@@ -229,7 +229,10 @@ def lower(
 
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)
-
+    print(mod)
+    device_mod = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod,)  # target)
+    print(device_mod)
+    return device_mod
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 

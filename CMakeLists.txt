@@ -112,6 +112,9 @@ tilelang_file_glob(GLOB TILE_LANG_SRCS
   src/target/rt_mod_cpp.cc
   # webgpu doesn't have system dependency
   src/target/codegen_webgpu.cc
+  # sophgo tpu
+  src/target/codegen_ppl.cc
+  src/target/rt_mod_ppl.cc
 )
 
 # Include CUDA source files if CUDA is enabled

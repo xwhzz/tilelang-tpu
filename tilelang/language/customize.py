@@ -3,8 +3,9 @@
 """The language interface for tl programs."""
 
 import tilelang.language as T
-from tvm.tir import PrimExpr, Buffer
+from tvm.tir import PrimExpr, Buffer, BufferRegion
 from typing import List, Union
+from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
 def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
@@ -94,3 +95,100 @@ def view(src: Buffer,
     if dtype is None:
         dtype = src.dtype
     return T.Buffer(shape, dtype, src.data)
+
+
+
+def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
+    Aptr = A.access_ptr("r")
+    Bptr = B.access_ptr("r")
+    Cptr = C.access_ptr("rw")
+    M = C.shape[0]
+    N = C.shape[1]
+    K = A.shape[0] if transpose_A else A.shape[1]
+    K_B = B.shape[1] if transpose_B else B.shape[0]
+    assert K == K_B, "gemm K shape check failed"
+    return T.call_extern("handle", "ppl.gemm", Aptr, Bptr, Cptr, transpose_A, transpose_B, M, N, K)
+
+
+def ppl_copy(
+    src,
+    dst,
+):
+
+    def get_extent(data):
+        if isinstance(data, Buffer):
+            return data.shape
+        elif isinstance(data, BufferRegion):
+            return [x.extent for x in data.region]
+        else:
+            return None
+
+    src_extent = get_extent(src)
+    dst_extent = get_extent(dst)
+
+    if src_extent:
+        extent = src_extent
+    elif dst_extent:
+        extent = dst_extent
+    else:
+        raise TypeError("Can't deduce copy extents from args")
+
+    def _to_region(data, access_type):
+        if isinstance(data, Buffer):
+            return buffer_to_tile_region(data, access_type)
+        elif isinstance(data, BufferRegion):
+            return buffer_region_to_tile_region(data, access_type)
+        else:
+            return buffer_load_to_tile_region(data, access_type, extent)
+
+    src = _to_region(src, "r")
+    dst = _to_region(dst, "w")
+    return T.call_extern("handle", "ppl.copy", src, dst)
+
+
+def ppl_fill(buffer, value):
+    buffer = buffer.access_ptr("w")
+    return T.call_extern("handle", "ppl.fill", buffer, value)
+
+def ppl_subtract(out, inp1, inp2):
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.sub", outptr, outptr, inpptr1, inpptr2)
+
+def ppl_mul_C(out, inp1, value):
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    return T.call_extern("handle", "ppl.mul_C", outptr, outptr, inpptr1, value)
+
+def ppl_mul(out, inp1, inp2):
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.mul", outptr, outptr, inpptr1, inpptr2)
+
+def ppl_exp2(out):
+    buffer = out.access_ptr("rw")
+    return T.call_extern("handle", "ppl.exp", buffer)
+
+def ppl_add(out, inp1, inp2):
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.add", outptr, outptr, inpptr1, inpptr2)
+
+def ppl_div(out, inp1, inp2):
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.div", outptr, outptr, inpptr1, inpptr2)
+
+def ppl_reduce_max(inp, out, dim, clear=True):
+    inpptr = inp.access_ptr("r")
+    outptr = out.access_ptr("rw")
+    return T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, dim, clear)
+
+def ppl_reduce_sum(inp, out, dim):
+    inpptr = inp.access_ptr("r")
+    outptr = out.access_ptr("rw")
+    return T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, dim)
