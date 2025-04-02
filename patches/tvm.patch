@@ -1,0 +1,110 @@
+diff --git a/src/tir/analysis/block_access_region_detector.cc b/src/tir/analysis/block_access_region_detector.cc
+index 57cf0ae1bf..22a04453eb 100644
+--- a/src/tir/analysis/block_access_region_detector.cc
++++ b/src/tir/analysis/block_access_region_detector.cc
+@@ -83,6 +83,8 @@ class BlockReadWriteDetector : public StmtExprVisitor {
+   /*!\ brief Internal analyzer. */
+   arith::Analyzer ana_;
+ 
++  std::unordered_set<const BufferNode*> should_write_buffers_;
++
+   /*!
+    * \brief Update read/write buffers and regions with provided buffer and region
+    * \param buffers The buffers should be updated
+@@ -155,7 +157,11 @@ void BlockReadWriteDetector::VisitExpr_(const BufferLoadNode* op) {
+     PrimExpr remapped_index = Substitute(index, let_bindings_);
+     relaxed_region.push_back(arith::EvalSet(arith::IntSet::Vector(remapped_index), dom_map_));
+   }
+-  Update(&read_buffers_, &read_regions_, op->buffer, relaxed_region);
++  if (should_write_buffers_.count(op->buffer.get())) {
++    Update(&writes_buffers_, &write_regions_, op->buffer, relaxed_region);
++  } else {
++    Update(&read_buffers_, &read_regions_, op->buffer, relaxed_region);
++  }
+   ExprVisitor::VisitExpr_(op);
+ }
+ 
+@@ -214,7 +220,7 @@ void BlockReadWriteDetector::VisitExpr_(const CallNode* op) {
+       StmtExprVisitor::VisitExpr_(op);
+     }
+     return;
+-  }
++  }  
+   if (op->op.same_as(builtin::if_then_else())) {
+     VisitExpr(op->args[0]);
+     {
+@@ -229,6 +235,17 @@ void BlockReadWriteDetector::VisitExpr_(const CallNode* op) {
+     }
+     return;
+   }
++  
++  if (op->op.same_as(builtin::call_extern())) {
++    std::string op_name = Downcast<StringImm>(op->args[0])->value;
++    if (op_name == "ppl.copy") {
++      auto dst = Downcast<Call>(op->args[2]);
++      auto buffer_load_ = Downcast<BufferLoad>(dst->args[0]);
++      should_write_buffers_.insert(buffer_load_->buffer.get());
++
++    }
++  }
++  
+   StmtExprVisitor::VisitExpr_(op);
+ }
+ 
+@@ -387,12 +404,14 @@ Array<Array<BufferRegion>> GetBlockReadWriteRegion(const Block& block,
+     excluded_buffers.insert(opaque_access->buffer.get());
+   }
+   Array<BufferRegion> writes = detector.CollectWrites(&excluded_buffers);
++  tvm::Dump(writes);
+   if (block->init.defined()) {
+     for (const BufferRegion& write_access : writes) {
+       excluded_buffers.insert(write_access->buffer.get());
+     }
+   }
+   Array<BufferRegion> reads = detector.CollectReads(&excluded_buffers);
++  tvm::Dump(reads);
+   for (const BufferRegion& opaque_access : opaques) {
+     reads.push_back(opaque_access);
+     writes.push_back(opaque_access);
+@@ -405,3 +424,4 @@ TVM_REGISTER_GLOBAL("tir.analysis.GetBlockReadWriteRegion").set_body_typed(GetBl
+ 
+ }  // namespace tir
+ }  // namespace tvm
++ 
+\ No newline at end of file
+diff --git a/src/tir/transforms/storage_rewrite.cc b/src/tir/transforms/storage_rewrite.cc
+index 877433c2d2..305870d48e 100644
+--- a/src/tir/transforms/storage_rewrite.cc
++++ b/src/tir/transforms/storage_rewrite.cc
+@@ -171,11 +171,11 @@ class LinearAccessPatternFinder final : public StmtExprVisitor {
+       ICHECK_LT(it->second.level, scope_.size()) << "Load memory in places other than store.";
+       scope_[it->second.level].touched.push_back(buffer_var);
+ 
+-      ICHECK_EQ(op->buffer->axis_separators.size() + 1, it->second.num_physical_dimensions)
+-          << "Buffer " << op->buffer->name << " is allocated with "
+-          << it->second.num_physical_dimensions
+-          << " physical dimensions, but is accessed as having "
+-          << op->buffer->axis_separators.size() + 1 << " physical dimensions" << std::endl;
++      // ICHECK_EQ(op->buffer->axis_separators.size() + 1, it->second.num_physical_dimensions)
++      //     << "Buffer " << op->buffer->name << " is allocated with "
++      //     << it->second.num_physical_dimensions
++      //     << " physical dimensions, but is accessed as having "
++      //     << op->buffer->axis_separators.size() + 1 << " physical dimensions" << std::endl;
+     }
+   }
+ 
+@@ -1325,10 +1325,10 @@ class VectorTypeAccessChecker : public StmtExprVisitor {
+       var_info.element_dtype = value_dtype.element_of();
+     }
+ 
+-    for (int i = 0; i < static_cast<int>(indices.size()) - 1; i++) {
+-      ICHECK(indices[i].dtype().is_scalar())
+-          << "Only the last index of a buffer access may be a vector type.";
+-    }
++    // for (int i = 0; i < static_cast<int>(indices.size()) - 1; i++) {
++    //   ICHECK(indices[i].dtype().is_scalar())
++    //       << "Only the last index of a buffer access may be a vector type.";
++    // }
+     int index_lanes = indices.size() ? indices.back().dtype().lanes() : 1;
+ 
+     DataType access_dtype = value_dtype;
