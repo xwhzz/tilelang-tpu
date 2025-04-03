@@ -27,6 +27,7 @@ nnfusion.tar.gz
 tmp/
 
 venv/
+.venv/
 .vscode/
 .vs/
 

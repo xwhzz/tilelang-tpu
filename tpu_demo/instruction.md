@@ -4,7 +4,7 @@
 After clone this repo, we need to git apply some tvm patch like the following:
 
 ```bash
-cp pathes/tvm.patch 3rdparty/tvm/tvm.patch
+cp patches/tvm.patch 3rdparty/tvm/tvm.patch
 cd 3rdparty/tvm
 git apply tvm.patch
 ```
