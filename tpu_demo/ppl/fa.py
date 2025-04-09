@@ -62,7 +62,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
             T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
             T.ppl_mul(logsum, logsum, scores_scale)
             T.ppl_add(logsum, logsum, scores_sum)
-            T.copy(acc_s, acc_s_cast)
+            T.ppl_copy(acc_s, acc_s_cast)
 
         @T.macro
         def Rescale(
