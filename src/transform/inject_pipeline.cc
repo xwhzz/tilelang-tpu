@@ -223,7 +223,6 @@ private:
       }
     }
     LetStmt let_stmt = LetStmt(cur_buffer_.get()->data, if_stmt, Evaluate(op));
-    tvm::Dump(let_stmt);
     return let_stmt;
   }
 

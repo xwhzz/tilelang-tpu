@@ -154,18 +154,18 @@ def ppl_subtract(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.sub", outptr, outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "ppl.sub", outptr, inpptr1, inpptr2)
 
 def ppl_mul_C(out, inp1, value):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
-    return T.call_extern("handle", "ppl.mul_C", outptr, outptr, inpptr1, value)
+    return T.call_extern("handle", "ppl.mul_C", outptr, inpptr1, value)
 
 def ppl_mul(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.mul", outptr, outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
 def ppl_exp2(out):
     buffer = out.access_ptr("rw")
@@ -175,13 +175,13 @@ def ppl_add(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.add", outptr, outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "ppl.add", outptr, inpptr1, inpptr2)
 
 def ppl_div(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
-    return T.call_extern("handle", "ppl.div", outptr, outptr, inpptr1, inpptr2)
+    return T.call_extern("handle", "ppl.div", outptr, inpptr1, inpptr2)
 
 def ppl_reduce_max(inp, out, dim, clear=True):
     inpptr = inp.access_ptr("r")
