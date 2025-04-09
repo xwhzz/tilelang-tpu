@@ -665,11 +665,9 @@
  inline std::string vector2string(const std::vector<int>& vec) {
    std::string ret = "{";
    for (auto& v : vec) {
-     std::cout << v << std::endl;
      ret += std::to_string(v) + ", ";
    }
    ret[ret.size() - 2] = '}';
-   std::cout << "ret: " << ret << std::endl;
    return ret;
  }
  
@@ -736,8 +734,6 @@
    if (op->op.same_as(builtin::call_extern())) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
     if (op_name == "ppl.copy") {
-      std::cout << "Debug (copy):\n";
-      tvm::Dump(op);
       tl::BufferMap buffer_map;
       auto process_copy = [&, this](const tl::RegionOp& src) -> std::tuple<std::string, std::string, std::string> {
         auto src_buffer = src.GetBuffer();
@@ -772,7 +768,7 @@
         }
         if (src_buffer.scope() == "global"){
           std::string src_strides;
-          std::cout << src_buffer->name << std::endl;
+
           auto strides = buffer_stride[src_buffer->name];
           src_strides = vector2string(strides);
           std::string min_expr;
@@ -785,7 +781,7 @@
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape + ", .stride = " + src_strides +", .addr = " + src_id + ".addr + " + min_expr +", .dtype = " + dtype + ", .mode = 2, .size = 1, .offset = " + min_expr + ", .unsigned_flag = 0, .default_stride = false};\n");
         } else if (src_buffer.scope() == "shared.dyn") {
-          std::cout << "actual data:  " << var_idmap_[src_buffer->data.get()] << std::endl;
+
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape + ", .stride = NULL, .addr = " + var_idmap_[src_buffer->data.get()] + ".addr, .dtype = " + dtype + ", .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};\n");
         }
         return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
@@ -796,15 +792,15 @@
       auto [dst_var_id, dst_flag, dst_dtype] = process_copy(dst);
       std::string ppl_inst;
       if (src_dtype != dst_dtype){
-        LOG(FATAL) << "Unsupported copy from " << src_dtype << " to " << dst_dtype;
+        // LOG(FATAL) << "Unsupported copy from " << src_dtype << " to " << dst_dtype;
+        // TODO: need to call tpu cast instruction.
       }
       if (src_flag == "global" && dst_flag == "shared.dyn"){
         ppl_inst += "tpu_gdma_cpy_S2L";
       } else if (src_flag == "shared.dyn" && dst_flag == "global") {
         ppl_inst += "tpu_gdma_cpy_L2S";
-      } else { // shared.dyn -> local memory
-        // local mem -> local mem
-        // LOG(FATAL) << "Unsupported copy from " << src_flag << " to " << dst_flag;
+      } else { 
+        // TODO: add other copy directions, like local mem -> local mem.
         ppl_inst += "mv";
       }
   
@@ -814,16 +810,10 @@
         this->PrintIndent();
         this->stream << i;
       }
-      // n c h w 
-      // lane 64
-      // 1, row, 1, col cube 
-      // 2 wei 
-      // w = 1 
     } else if (op_name == "ppl.fill") {
       auto var_ = op->args[1].as<CallNode>()->args[1].as<VarNode>();
       auto data_ = var_idmap_[var_];
       auto dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      // std::cout << dtype << std::endl;
       std::string dtype_1, dtype_2;
       if (dtype == DataType::Float(16)){
         dtype_1 = "f16";
@@ -842,14 +832,13 @@
       auto a_access_data = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()]; 
       auto b_access_data = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()]; 
       auto c_access_data = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()]; 
-      // c_access_data = std::to_string(buffer_addrs_[op->args[3].as<CallNode>()->args[1].as<VarNode>()]);
-      // std::cout << "Gemm args: " << var_idmap_[op->args[0].as<CallNode>()->args[1].as<VarNode>()] << std::endl;
+
       auto M = Downcast<IntImm>(op->args[6])->value;
       auto N = Downcast<IntImm>(op->args[7])->value;
       auto K = Downcast<IntImm>(op->args[8])->value;
       std::string M_K_N = std::to_string(M) + ", " + std::to_string(K) + ", " + std::to_string(N);
       this->PrintIndent();
-      // fp32 matrix layout
+
       this->stream << "tpu_bdc_fp_mm("<< c_access_data << ".addr, "<< a_access_data << ".addr, " << b_access_data<< ".addr,"<< M_K_N << ", DT_FP32, DT_FP16, true);\n";
     } else if (op_name == "ppl.sub") {
       handle_elementwise("tpu_bdc_fp_sub", true);
@@ -893,9 +882,6 @@
     {
       int then_scope = this->BeginScope();
       std::string true_val = PrintExpr(op->args[1]);
-      // std::cout << "Here check:\n";
-      // tvm::Dump(op);
-      // int true_val = buffer_addrs_[Downcast<Var>(op->args[1]).get()];
       this->PrintIndent();
       this->stream << result << " = " << true_val << ";\n";
       this->EndScope(then_scope);
@@ -905,7 +891,6 @@
     {
       int else_scope = this->BeginScope();
       std::string false_val = PrintExpr(op->args[2]);
-      // int false_val = buffer_addrs_[Downcast<Var>(op->args[2]).get()];
       this->PrintIndent();
       this->stream << result << " = " << false_val  << ";\n";
       this->EndScope(else_scope);
@@ -920,13 +905,11 @@
  }
 
  void CodeGenTileLangPPL::VisitStmt_(const LetStmtNode* op) {
-  // error
-  tvm::Dump(op->body);
-  std::cout << op->body->GetTypeKey() << std::endl;
+
   if (op->body.as<Evaluate>()) {
     Evaluate e = Downcast<Evaluate>(op->body);
   }
-  // std::cout << op->body->GetTypeKey() << std::endl;
+
   std::string value = PrintExpr(op->value);
   if (print_ssa_form_) {
     ICHECK(!var_idmap_.count(op->var.get()));

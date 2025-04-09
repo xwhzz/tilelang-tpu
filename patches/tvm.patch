@@ -1,5 +1,5 @@
 diff --git a/src/tir/analysis/block_access_region_detector.cc b/src/tir/analysis/block_access_region_detector.cc
-index 57cf0ae1bf..22a04453eb 100644
+index 57cf0ae1bf..113244b5a5 100644
 --- a/src/tir/analysis/block_access_region_detector.cc
 +++ b/src/tir/analysis/block_access_region_detector.cc
 @@ -83,6 +83,8 @@ class BlockReadWriteDetector : public StmtExprVisitor {
@@ -55,14 +55,14 @@ index 57cf0ae1bf..22a04453eb 100644
      excluded_buffers.insert(opaque_access->buffer.get());
    }
    Array<BufferRegion> writes = detector.CollectWrites(&excluded_buffers);
-+  tvm::Dump(writes);
++
    if (block->init.defined()) {
      for (const BufferRegion& write_access : writes) {
        excluded_buffers.insert(write_access->buffer.get());
      }
    }
    Array<BufferRegion> reads = detector.CollectReads(&excluded_buffers);
-+  tvm::Dump(reads);
++
    for (const BufferRegion& opaque_access : opaques) {
      reads.push_back(opaque_access);
      writes.push_back(opaque_access);
