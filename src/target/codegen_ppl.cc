@@ -870,7 +870,6 @@
 
     // remove hard code "shared"
     if (auto var = op->args[1].as<VarNode>()) {
-      std::string op_1_name_ = var->name_hint;
       auto search = buffer_addrs_.find(var);
       if (search != buffer_addrs_.end()) {
         this->stream << "__ppl_tensor_info ";
