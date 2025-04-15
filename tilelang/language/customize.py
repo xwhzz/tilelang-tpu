@@ -167,9 +167,23 @@ def ppl_mul(out, inp1, inp2):
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
-def ppl_exp2(out):
+@T.macro
+def ppl_exp2(out, block_M, block_N, dtype): # only support FP32
     buffer = out.access_ptr("rw")
-    return T.call_extern("handle", "ppl.exp", buffer)
+    work0 = T.alloc_shared([block_M, block_N], dtype)
+    work1 = T.alloc_shared([block_M, block_N], dtype)
+    coeff = T.alloc_shared([64,32], dtype) # npu number is 64
+    table = T.alloc_shared([64,192], dtype) # npu number is 64
+    work0ptr = work0.access_ptr("rw")
+    work1ptr = work1.access_ptr("rw")
+    coeffptr = coeff.access_ptr("rw")
+    tableptr = table.access_ptr("rw")
+    T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
+
+def ppl_rsqrt(out, inp):
+    inpptr = inp.access_ptr("r")
+    outptr = out.access_ptr("w")
+    return T.call_extern("handle", "ppl.rsqrt", inpptr, outptr)
 
 def ppl_add(out, inp1, inp2):
     outptr = out.access_ptr("w")

@@ -852,12 +852,27 @@
       handle_elementwise_const("tpu_bdc_fp_mul_C");
     } 
     /** The following op needs to be handled specially. */
-    else if (op_name == "ppl.exp2") {
-      
+    else if (op_name == "ppl.exp") {
+      auto work0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto work1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto coeff = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
+      auto table = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
+      this->PrintIndent();
+      this->stream << "tpu_bdc_load_fp32_exp_coeff(" << coeff << ".addr" << ");\n";
+      this->PrintIndent();
+      this->stream << "tpu_bdc_load_fp32_exp_table(" << table << ".addr" << ");\n";
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0_shape = buffer_shape[src0];
+      // void tpu_bdc_fp32_exp(local_addr_t dst_addr, local_addr_t src_addr, local_addr_t work0_addr, local_addr_t work1_addr, local_addr_t coeff_addr, local_addr_t table_addr, const dim4 *shape)
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp32_exp(" << dst << ".addr, " << src0 << ".addr, " << work0 << ".addr, " << work1 << ".addr, " << coeff << ".addr, " << table << ".addr, " << "&" << src0 << ".shape" << ");\n";
     } else if (op_name == "ppl.reduce_max") {
 
     } else if (op_name == "ppl.reduce_sum") {
 
+    } else if (op_name == "ppl.rsqrt") {
+      
     }
 
   }
