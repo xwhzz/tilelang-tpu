@@ -26,7 +26,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Legalize vectorized loops to ensure they are valid
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
-    # mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
+    mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
@@ -54,7 +54,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
+        print(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        print(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
 
     # TODO(lei): may need a pass to fuse the if-then-else in the

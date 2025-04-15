@@ -662,10 +662,10 @@
    return os.str();
  }
  
- inline std::string vector2string(const std::vector<int>& vec) {
+ inline std::string vector2string(const std::vector<std::string>& vec) {
    std::string ret = "{";
    for (auto& v : vec) {
-     ret += std::to_string(v) + ", ";
+     ret += v + ", ";
    }
    ret[ret.size() - 2] = '}';
    return ret;
@@ -696,9 +696,9 @@
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
     auto src1= var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-    auto dst_shape = buffer_shape[dst];
-    auto src0_shape = buffer_shape[src0];
-    auto src1_shape = buffer_shape[src1];
+    auto dst_shape = local_buffer_shape[dst];
+    auto src0_shape = local_buffer_shape[src0];
+    auto src1_shape = local_buffer_shape[src1];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
     std::string dtype;
     if (dtype_ == DataType::Float(16)){
@@ -718,7 +718,7 @@
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
     float value = Downcast<FloatImm>(op->args[3])->value;
-    auto src0_shape = buffer_shape[src0];
+    auto src0_shape = local_buffer_shape[src0];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
     std::string dtype;
     if (dtype_ == DataType::Float(16)){
@@ -775,7 +775,7 @@
           std::vector<int> stride_map = {1, 3};
           for (int i=0; i < src_ranges.size(); i++){
             auto sr = src_ranges[i];
-            min_expr += "("+PrintExpr(sr->min) + ") * " + std::to_string(strides[stride_map[i]]) + "+";
+            min_expr += "("+PrintExpr(sr->min) + ") * " + strides[stride_map[i]] + "+";
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
@@ -994,7 +994,7 @@ void CodeGenTileLangPPL::VisitStmt_(const AttrStmtNode* op) {
      auto addr = f_attrs.GetAttr(vid, PrimExpr(0)).as<IntImmNode>()->value;
       buffer_addrs_[op->buffer_var.get()] = addr;
      stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape << ", .stride = NULL" <<", .addr = " <<  addr << ", .dtype = "<< op_dtype << ", .mode = 2" << ", .align_mode = 1" << ", .size = " << tensor_size << ", .unsigned_flag = 0, .default_stride = true};\n";
-      this->buffer_shape[vid] = shapes;
+      local_buffer_shape[vid] = shapes;
       // store local tensor shape
     }
 
@@ -1086,6 +1086,10 @@ inline void PrintBinaryExpr(const T* op, const char* opstr,
  void CodeGenTileLangPPL::VisitExpr_(const FloorModNode* op, std::ostream& os) {  // NOLINT(*)
     PrintBinaryExpr(op, "%", os, this);
  }
+
+ void CodeGenTileLangPPL::VisitExpr_(const FloorDivNode* op, std::ostream& os) {  // NOLINT(*)
+  PrintBinaryExpr(op, "/", os, this);
+}
  
  void CodeGenTileLangPPL::PrintWmmaScope(const std::string& scope, DataType t,
   const VarNode* variable, std::ostream& os) {
@@ -1127,59 +1131,19 @@ return;
    std::unordered_map<const tir::VarNode*, std::string> var_global_mem_map;
  
    auto default_stride = [this](const std::string& node) {
-     auto buf_shape = buffer_shape[node];
-    buffer_stride[node] = {1, 1, 1, 1};
+    auto buf_shape = buffer_shape[node];
+    buffer_stride[node] = std::vector<std::string>(4, "1");
+
     for (int i = 2; i >= 0; i--) {
-      buffer_stride[node][i] = buf_shape[i + 1] * buffer_stride[node][i + 1];
+      buffer_stride[node][i] = buf_shape[i + 1] + "*" + buffer_stride[node][i + 1];
     }
    };
- 
+   std::set<const VarNode*> vars;
    // don't use name hint, but can remove later.
    auto allocate_name = [&, this](const Var& v, int index, int length) {
      auto v_node = v.get();
      std::string vid = "v" + std::to_string(index + 1);
      std::string rid = "v" + std::to_string(index + 1 + length);
-
-     auto buffer_node = buffer_map[v];
-     auto shape = buffer_node->shape;
- 
-    std::string shape_s = "{";
-    int tensor_size = 1;
-    if (shape.size() == 2) {
-     buffer_shape[buffer_node->name] = {1, shape[0].as<IntImmNode>()->value, 1, shape[1].as<IntImmNode>()->value};
-     default_stride(buffer_node->name);
-     shape_s += "1 ,";
-     shape_s += std::to_string(shape[0].as<IntImmNode>()->value);
-     tensor_size *= shape[0].as<IntImmNode>()->value;
-     shape_s += ", 1, ";
-     shape_s += std::to_string(shape[1].as<IntImmNode>()->value);
-     tensor_size *= shape[1].as<IntImmNode>()->value;
-    } else if (shape.size() == 4) {
-      buffer_shape[buffer_node->name] = {};
-      for (auto s: shape) {
-        buffer_shape[buffer_node->name].push_back(s.as<IntImmNode>()->value);
-      }
-      default_stride(buffer_node->name);
-      for (auto s: shape) {
-        shape_s += std::to_string(s.as<IntImmNode>()->value);
-        tensor_size *= s.as<IntImmNode>()->value;
-      }
-    }
-
-    shape_s += "}";
-     std::string dtype;
-     int bytes_size = 0;
- 
-     if (buffer_node->dtype == DataType::Float(16)){
-       dtype = "DT_FP16";
-       bytes_size = 2;
-     } else if (buffer_node->dtype == DataType::Float(32)){
-       dtype = "DT_FP32";
-       bytes_size = 4;
-     }
-     tensor_size *= bytes_size;
-     std::string inst = "__ppl_tensor_info " + rid + " = {.shape = " + shape_s + ", .stride = NULL, .addr = " + vid + ", .dtype = " + dtype + ", .mode = 2, .align_mode = 0, .size = " + std::to_string(tensor_size) + ", .unsigned_flag = 0, .default_stride = true};\n";
-     var_global_mem_map[v_node] = inst;
      std::string name_hint = v_node->name_hint;
      this->var_idmap_[v_node] = rid;
  
@@ -1187,7 +1151,74 @@ return;
      for(int i{0}; i < 7; i++){
        name_hint.pop_back();
      }
+     std::cout << name_hint << std::endl;
      this->parameter_map[name_hint] = rid;
+     
+     if (buffer_map.Get(v) == nullptr) {
+      return vid;
+     }
+
+     auto buffer_node = buffer_map[v];
+     auto shape = buffer_node->shape;
+     auto& buf_shape = buffer_shape[buffer_node->name];
+    if (shape.size() == 2) {
+     // buffer_shape[buffer_node->name] = {1, shape[0].as<IntImmNode>()->value, 1, shape[1].as<IntImmNode>()->value};
+     buf_shape.push_back("1");
+     std::string var_name;
+     if (auto var = shape[0].as<VarNode>()) {
+      if (var_idmap_.count(var) == 0) {
+        var_name = AllocVarID(var);
+        var_idmap_[var] = var_name;
+      } else {
+        var_name = var_idmap_[var];
+      }
+      vars.insert(var);
+     } else {
+      var_name = std::to_string(shape[0].as<IntImmNode>()->value);
+     }
+
+     buf_shape.push_back(var_name);
+     buf_shape.push_back("1");
+     if (auto var = shape[1].as<VarNode>()) {
+      if (var_idmap_.count(var) == 0) {
+        var_name = AllocVarID(var);
+        var_idmap_[var] = var_name;
+      } else {
+        var_name = var_idmap_[var];
+      }
+      vars.insert(var);
+     } else {
+      var_name = std::to_string(shape[1].as<IntImmNode>()->value);
+     }
+
+     buf_shape.push_back(var_name);
+    } else if (shape.size() == 4) {
+      for (auto s: shape) {
+        std::string var_name;
+        if (auto var = s.as<VarNode>()) {
+          if (var_idmap_.count(var) == 0) {
+            var_name = AllocVarID(var);
+            var_idmap_[var] = var_name;
+          } else {
+            var_name = var_idmap_[var];
+          }
+          vars.insert(var);
+         } else {
+          var_name = std::to_string(s.as<IntImmNode>()->value);
+         }
+         buf_shape.push_back(var_name);
+      }
+    }
+
+    default_stride(buffer_node->name);
+     std::string dtype; 
+     if (buffer_node->dtype == DataType::Float(16)){
+       dtype = "DT_FP16";
+     } else if (buffer_node->dtype == DataType::Float(32)){
+       dtype = "DT_FP32";
+     }
+     std::string inst = "__ppl_tensor_info " + rid + " = {.shape = " + vector2string(buf_shape) + ", .stride = NULL, .addr = " + vid + ", .dtype = " + dtype + ", .mode = 2, .align_mode = 0, .size = 1, .unsigned_flag = 0, .default_stride = true};\n";
+     var_global_mem_map[v_node] = inst;
      return vid;
    };
    int param_len = f->params.size();
@@ -1197,6 +1228,10 @@ return;
      params_name.push_back(vid);
      if (i != 0) stream << ", ";
      stream << restrict_keyword_ <<' ' << vid;
+   }
+   for (auto var: vars) {
+    // TODO: fix var->dtype 
+    stream << ", int " << var_idmap_[var];
    }
    stream << ") {\n";
  

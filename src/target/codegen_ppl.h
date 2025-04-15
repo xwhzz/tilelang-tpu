@@ -65,7 +65,7 @@ class CodeGenTileLangPPL final : public CodeGenC {
   void VisitStmt_(const AttrStmtNode* op) final;
   void VisitStmt_(const LetStmtNode* op) final;
   void VisitExpr_(const FloorModNode* op, std::ostream& os); 
-
+  void VisitExpr_(const FloorDivNode* op, std::ostream& os); 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const PrimFunc& f);
 
@@ -99,8 +99,9 @@ class CodeGenTileLangPPL final : public CodeGenC {
   std::unordered_map<const VarNode*, std::string> fragment_shapes;
   std::unordered_map<const VarNode*, std::string> fragment_layouts;
   std::unordered_map<std::string, std::string> parameter_map;
-  std::unordered_map<std::string, std::vector<int>> buffer_shape;
-  std::unordered_map<std::string, std::vector<int>> buffer_stride;
+  std::unordered_map<std::string, std::vector<int>> local_buffer_shape;
+  std::unordered_map<std::string, std::vector<std::string>> buffer_shape;
+  std::unordered_map<std::string, std::vector<std::string>> buffer_stride;
   std::unordered_map<const VarNode*, std::vector<std::string>> local_buffer_name_map;
   
   std::unordered_map<const VarNode*, int> buffer_addrs_;
