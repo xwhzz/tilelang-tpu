@@ -191,4 +191,38 @@ def ppl_reduce_max(inp, out, dim, clear=True):
 def ppl_reduce_sum(inp, out, dim):
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("rw")
-    return T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, dim)
+    en_num = 64
+    inp_shape = list(inp.shape)
+    dim_size = inp_shape[dim]
+    align_dim_size = (dim_size + en_num - 1) // en_num * en_num
+
+    if align_dim_size > dim_size:
+        # 补齐维度
+        # 1.创建一个新的大buffer
+        fill_shape = inp_shape.copy()
+        fill_shape [dim] = align_dim_size
+        filled_inp = T.Buffer(fill_shape, inp.dtype, inp.data)
+
+        # 2.将原buffer拷贝到新buffer
+        T.call_extern("handle", "ppl.copy", inpptr, filled_inp.access_ptr("w"))
+
+        # 3.创建fill区域的子视图
+        fill_starts = [0] * len(fill_shape)
+        fill_starts[dim] = dim_size
+
+        fill_extents = [s for s in fill_shape]
+        fill_extents[dim] = align_dim_size - dim_size
+        
+        fill_regions = []
+        for i, (start, extent) in enumerate(zip(fill_starts, fill_extents)):
+            fill_regions.append(T.Range(start, extent))
+        
+        fill_view = T.BufferRegion(filled_inp, fill_regions)
+
+        # 4.使用fill_view填充新buffer
+        T.call_extern("handle", "ppl.fill", fill_view.access_ptr("w"), 0)
+
+        inpptr = filled_inp.access_ptr("r")
+    tmp_buffer = T.alloc_shared((fill_shape[0], fill_shape[1]), "float32")
+    outptr = out.access_ptr("rw")
+    return T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, inpptr.shape, dim, tmp_buffer.access_ptr("rw"), tmp_buffer.access_ptr("r").shape)

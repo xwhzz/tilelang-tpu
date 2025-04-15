@@ -857,7 +857,59 @@
     } else if (op_name == "ppl.reduce_max") {
 
     } else if (op_name == "ppl.reduce_sum") {
+      int input_addr, output_addr, input_shape, kernel, padding, stride, dilation;  // todo
+/*
+      // n c h w 
+      auto input_addr = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+      auto output_addr = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+      // auto input_shape = op->args[3].as<CallNode>()->args[1].as<VarNode>();
+      auto dim = Downcast<IntImm>(op->args[4])->value;
+      auto tmp_tensor = op->args[5].as<CallNode>()->args[1].as<VarNode>();
+      // auto tmp_tensor_shape = op->args[6].as<CallNode>()->args[1].as<VarNode>();
+            
+      dim2 kernel = {input_shape[1] / 64, 1};
+      padding_t padding = {0, 0, 0, 0};
+      dim2 stride = {1, 1};
+      dim2 dilation = {1, 1};
+            
 
+      tpu_bdc_fp_avg_pool2d(tmp_tensor, input_addr, input_shape, kernel, padding, stride, dilation, "DT_FP16", 1.0f);
+      kernel = {1, 64};
+      tpu_bdc_fp_avg_pool2d(output_addr, tmp_tensor, tmp_tensor_shape, kernel, padding, stride, dilation, "DT_FP16", 1.0f);
+      
+ */   
+      auto input_addr = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto output_addr = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto input_shape = op->args[3].as<CallNode>()->args[1].as<VarNode>();
+      auto dim = Downcast<IntImm>(op->args[4])->value;
+      auto tmp_tensor = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype_1, dtype_2;
+      if (dtype == DataType::Float(16)){
+        dtype_1 = "f16";
+        dtype_2 = "DT_FP16";
+      } else if (dtype == DataType::Float(32)) {
+        dtype_1 = "f32";
+        dtype_2 = "DT_FP32";
+      }
+
+      // auto tmp_tensor_shape = op->args[6].as<CallNode>()->args[1].as<VarNode>();
+
+      // 设置第一次池化的参数
+      this->PrintIndent();
+      this->stream << "dim2 kernel = {" << input_shape << "[1] / 64, 1};\n";
+      this->PrintIndent();
+      this->stream << "padding_t padding = {0, 0, 0, 0};\n";
+      this->PrintIndent();
+      this->stream << "dim2 stride = {1, 1};\n";
+      this->PrintIndent();
+      this->stream << "dim2 dilation = {1, 1};\n";
+
+      // 第一次平均池化操作
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_avg_pool2d(" << tmp_tensor << ".addr, " 
+                   << input_addr << ".addr, " << input_shape << ".addr, " 
+                   << "&kernel, &padding, &stride, &dilation, " << DT_FP16 << ", 1.0f);\n";
     }
 
   }
