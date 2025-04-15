@@ -4,6 +4,7 @@
 import tilelang
 import tilelang.language as T
 
+
 def flashattn(batch, heads, seq_len, dim, is_causal):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
@@ -73,8 +74,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
             # for i, j in T.Parallel(block_M, dim):
             #     acc_o[i, j] *= scores_scale[i]
             # bdcast
-            T.ppl_mul(acc_o, acc_o,scores_scale)
-            
+            T.ppl_mul(acc_o, acc_o, scores_scale)
+
         @T.prim_func
         def main(
                 Q: T.Buffer(shape, dtype),
@@ -82,9 +83,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
                 V: T.Buffer(shape, dtype),
                 Output: T.Buffer(shape, dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, is_cpu=True) as (bx, by, bz):
-                Q_shared = T.alloc_shared([block_M, dim], dtype) # 1, block_m, 1, dim
+            with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, is_cpu=True) as (bx, by, bz):
+                Q_shared = T.alloc_shared([block_M, dim], dtype)  # 1, block_m, 1, dim
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
                 O_shared = T.alloc_shared([block_M, dim], dtype)
@@ -100,7 +100,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
 
                 T.ppl_copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
                 T.ppl_fill(acc_o, T.float32(0))
-                T.ppl_fill(logsum,T.float32(0))
+                T.ppl_fill(logsum, T.float32(0))
                 T.ppl_fill(scores_max, -T.infinity(accum_dtype))
 
                 loop_range = (
@@ -113,7 +113,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
                             scores_sum, logsum)
                     Rescale(acc_o, scores_scale)
                     MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
-                T.ppl_div(acc_o, acc_o,logsum)
+                T.ppl_div(acc_o, acc_o, logsum)
                 T.ppl_copy(acc_o, O_shared)
                 T.ppl_copy(O_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
 
@@ -121,8 +121,9 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
 
     def kernel(block_M, block_N, num_stages, threads):
         return kernel_func(block_M, block_N, num_stages, threads)
+
     return kernel
 
 
-func =  flashattn(1, 8, 256, 80, False)(64, 64, 2, 128)
+func = flashattn(1, 8, 256, 80, False)(64, 64, 2, 128)
 mod = tilelang.lower(func)

@@ -309,6 +309,7 @@ def FlattenBuffer():
     """
     return _ffi_api.FlattenBuffer()  # type: ignore
 
+
 def AddressAssign():
     """AddressAssign
 
