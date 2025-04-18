@@ -857,62 +857,239 @@
     } else if (op_name == "ppl.reduce_max") {
 
     } else if (op_name == "ppl.reduce_sum") {
-      int input_addr, output_addr, input_shape, kernel, padding, stride, dilation;  // todo
-/*
-      // n c h w 
-      auto input_addr = op->args[1].as<CallNode>()->args[1].as<VarNode>();
-      auto output_addr = op->args[2].as<CallNode>()->args[1].as<VarNode>();
-      // auto input_shape = op->args[3].as<CallNode>()->args[1].as<VarNode>();
-      auto dim = Downcast<IntImm>(op->args[4])->value;
-      auto tmp_tensor = op->args[5].as<CallNode>()->args[1].as<VarNode>();
-      // auto tmp_tensor_shape = op->args[6].as<CallNode>()->args[1].as<VarNode>();
-            
-      dim2 kernel = {input_shape[1] / 64, 1};
-      padding_t padding = {0, 0, 0, 0};
-      dim2 stride = {1, 1};
-      dim2 dilation = {1, 1};
-            
+      // 提取输入、输出和临时张量
+      auto input_tensor = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto output_tensor = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto tmp_tensor = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto eu_num = Downcast<IntImm>(op->args[4])->value;
+      auto align_w = Downcast<IntImm>(op->args[5])->value;
+      auto stride_n = Downcast<IntImm>(op->args[6])->value;
 
-      tpu_bdc_fp_avg_pool2d(tmp_tensor, input_addr, input_shape, kernel, padding, stride, dilation, "DT_FP16", 1.0f);
-      kernel = {1, 64};
-      tpu_bdc_fp_avg_pool2d(output_addr, tmp_tensor, tmp_tensor_shape, kernel, padding, stride, dilation, "DT_FP16", 1.0f);
-      
- */   
-      auto input_addr = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto output_addr = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto input_shape = op->args[3].as<CallNode>()->args[1].as<VarNode>();
-      auto dim = Downcast<IntImm>(op->args[4])->value;
-      auto tmp_tensor = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
-      auto dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype_1, dtype_2;
-      if (dtype == DataType::Float(16)){
-        dtype_1 = "f16";
-        dtype_2 = "DT_FP16";
-      } else if (dtype == DataType::Float(32)) {
-        dtype_1 = "f32";
-        dtype_2 = "DT_FP32";
+      // 获取数据类型
+    //   typedef union {
+    //     char           s4;
+    //     unsigned char  u4;
+    //     char           s8;
+    //     unsigned char  u8;
+    //     float8e5m2     f8e5m2;
+    //     float8e4m3     f8e3m4;
+    //     short          s16;
+    //     unsigned short u16;
+    //     float16        f16;
+    //     bfloat16       bf16;
+    //     int            s32;
+    //     unsigned int   u32;
+    //     float          f32;
+    //     float20        f20;
+    // } scalar_t;
+    
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype, dtype_2;
+      if (dtype_ == DataType::Float(16)){
+        dtype = "DT_FP16";
+        dtype_2 = "f16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+        dtype_2 = "f32";
+      } else if (dtype_ == DataType::Int(32)) {
+        dtype = "DT_INT32";
+        dtype_2 = "s32";
+      }else if (dtype_ == DataType::UInt(32)) {
+        dtype = "DT_UINT32";
+        dtype_2 = "u32";
+      }else if (dtype_ == DataType::Int(16)) {
+        dtype = "DT_INT16";
+        dtype_2 = "s16";
+      } else {
+        LOG(FATAL) << "Unsupported dtype " << dtype_;
       }
-
-      // auto tmp_tensor_shape = op->args[6].as<CallNode>()->args[1].as<VarNode>();
-
-      // 设置第一次池化的参数
+      // 计算EU数和对齐尺寸
       this->PrintIndent();
-      this->stream << "dim2 kernel = {" << input_shape << "[1] / 64, 1};\n";
+      this->stream << "int eu_num = "<<eu_num<<";\n";
       this->PrintIndent();
-      this->stream << "padding_t padding = {0, 0, 0, 0};\n";
+      this->stream << "int align_w = " << align_w << ";\n";
+      
+      // // 创建填充值（对于sum，使用0作为填充值）
+      this->PrintIndent();
+      this->stream << "scalar_t pad_val = {." 
+                  << dtype_2 
+                  << " = 0};\n";
+
+      // 判断是否需要填充 - 只有在宽度不是EU数的倍数时才需要填充
+      this->PrintIndent();
+      this->stream << "if (align_w > " << input_tensor << ".shape.w) {\n";
+
+      // 计算填充区域大小和偏移
+      this->PrintIndent();
+      this->stream << "  dim4 fill_shape = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, align_w - " << input_tensor << ".shape.w};\n";
+      this->PrintIndent();
+      int elem_size = 1;
+      if (dtype_ == DataType::Float(16)) {
+        elem_size = 2;
+      } else if (dtype_ == DataType::Float(32)) {
+        elem_size = 4;
+      } else if (dtype_ == DataType::Int(32)) {
+        elem_size = 4;
+      } else if (dtype_ == DataType::UInt(32)) {
+        elem_size = 4;
+      } else if (dtype_ == DataType::Int(16)) {
+        elem_size = 2;
+      } else {
+        LOG(FATAL) << "Unsupported dtype " << dtype_;
+      }
+      this->stream << "  int elem_size = " << elem_size << ";\n";
+      this->PrintIndent();
+      this->stream << "  int offset = " << input_tensor << ".shape.w * elem_size;\n";
+      this->PrintIndent();
+      this->stream << "  dim4 fill_tensor_stride = {" << stride_n << ", align_w, " 
+                  << input_tensor << ".shape.w, 1};\n";
+
+      // 创建填充视图 
+      this->PrintIndent();
+      this->stream << "  __ppl_tensor_info fill_tensor = {.shape = fill_shape, .stride = fill_tensor_stride, "
+                  << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
+                  << ".unsigned_flag = 0, .default_stride = false};\n";
+
+      // 填充
+      this->PrintIndent();
+      this->stream << "  tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
+                  << "(fill_tensor.default_stride ? NULL : &fill_tensor.stride), " << dtype << ");\n";
+      
+      this->PrintIndent();
+      this->stream << "}\n";
+      
+      // 创建池化所需的形状
+      this->PrintIndent();
+      this->stream << "dim4 in_reduce_h = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, align_w / eu_num, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 out_reduce_h = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 in_reduce_w = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 out_reduce_w = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, 1};\n";
+
+      // 设置池化参数
+      this->PrintIndent();
+      this->stream << "dim2 kernel = {align_w / eu_num, 1};\n";
+      this->PrintIndent();
+      this->stream << "padding_t pad = {0, 0, 0, 0};\n";
       this->PrintIndent();
       this->stream << "dim2 stride = {1, 1};\n";
       this->PrintIndent();
       this->stream << "dim2 dilation = {1, 1};\n";
 
-      // 第一次平均池化操作
+      // 创建输入和临时视图
       this->PrintIndent();
-      this->stream << "tpu_bdc_fp_avg_pool2d(" << tmp_tensor << ".addr, " 
-                   << input_addr << ".addr, " << input_shape << ".addr, " 
-                   << "&kernel, &padding, &stride, &dilation, " << DT_FP16 << ", 1.0f);\n";
-    }
+      this->stream << "__ppl_tensor_info input_view = {.shape = in_reduce_h, .stride = {0}, "
+                  << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info tmp_view = {.shape = out_reduce_h, .stride = {0}, "
+                  << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
 
-  }
+      this->PrintIndent();
+      this->stream << "scalar_t scale = {.f32 = (float)1.000000000e+00};\n";
+      if (dtype_ == DataType::Float(16)) {
+        this->PrintIndent(); 
+        this->stream << "scale = tpu_cast(scale, DT_FP16, DT_FP32, RM_HALF_TO_EVEN);\n";
+      } else if (dtype_ == DataType::Int(32)) {
+        this->PrintIndent(); 
+        this->stream << "scale = tpu_cast(scale, DT_INT32, DT_FP32, RM_HALF_TO_EVEN);\n"; // todo
+      } else if (dtype_ == DataType::UInt(32)) {
+        this->PrintIndent(); 
+        this->stream << "scale = tpu_cast(scale, DT_UINT32, DT_FP32, RM_HALF_TO_EVEN);\n"; // todo
+      }
+      // 第一次均值池化（通过设置scale实现求和）
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, &input_view.shape, "
+                  << "&kernel, &pad, &stride, &dilation, " << dtype << ", scale);\n";
+
+      // 修改kernel大小
+      this->PrintIndent();
+      this->stream << "dim2 kernel2 = {1, eu_num};\n";
+      
+      // 创建输出视图 - 更紧凑的格式
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info output_view = {.shape = out_reduce_w, .stride = {0}, "
+                  << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, .stride = {0}, "
+                  << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      // 第二次均值池化（通过设置scale实现求和）
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, "
+                  << "&kernel2, &pad, &stride, &dilation, " << dtype << ", scale);\n";
+    } else if (op_name == "ppl.embedding"){
+      // T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, outer_num, inner_num, select_num, index_num, const_val)
+      auto output_tensor = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto param_tensor = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto index_tensor = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto outer_num = Downcast<IntImm>(op->args[4])->value;
+      auto inner_num = Downcast<IntImm>(op->args[5])->value;
+      auto select_num = Downcast<IntImm>(op->args[6])->value;
+      auto index_num = Downcast<IntImm>(op->args[7])->value;
+      auto const_val = Downcast<IntImm>(op->args[8])->value;
+      // int core_idx = get_core_index();
+      // int inner_slice = div_up(inner_num, core_num);
+      // int real_inner_slice = min(inner_slice, inner_num - core_idx * inner_slice);
+      // dim4 output_shape = {1, 1, index_num, inner_num};
+      // dim4 param_shape = {1, 1, select_num, inner_num};
+      // dim4 index_shape = {1, 1, index_num, 1};
+      // if (inner_num > select_num){
+      //   // split the dim of vector & param
+      //   int inner_slice = (inner_num + core_num - 1) / core_num;
+      //   int real_inner_slice = MIN(inner_slice, inner_num - core_idx * inner_slice);
+      //   if (real_inner_slice > 0) {
+      //      dim4 offset = {0, 0, 0, core_idx * inner_slice};
+      
+      //   }
+      //   
+      //   
+      //   
+      // if (param_ptr.size && index_subview.size) {
+      //   tpu_gdma_h_gather_S2S(out_subview.addr, param_subview.addr, index_ptr.addr, false, const_val, &out_subview.shape, &param_subview.shape.h, (out_subview.default_stride ? NULL : &out_subview.stride),(param_subview.default_stride ? NULL : &param_subview.stride),(index_ptr.default_stride ? NULL : &index_ptr.stride),DT_FP16);
+      // };
+      // } else {
+      //   // split the index & param
+      //   int index_slice = (index_num + core_num - 1) / core_num;
+      //   int allocated_core = (index_num + index_slice -1) / index_slice;
+      //   
+      //   int real_index_slice = MIN(index_slice, index_num - core_idx * index_slice);
+      //   if (core_idx < allocated_core) {
+      //     dim4 out_slice_shape = {1, 1, real_index_slice, inner_num};
+      //     dim4 index_slice_shape = {1, 1, real_index_slice, 1};
+      //     out_stride_n = inner_num * index_num;
+      //     out_stride = {stride_n, stride_n, inner_num, 1};
+      //     _tensor__embedding_kernel_t output_t = {.shape = output_shape, .stride = out_stride, .addr = &output_tensor, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = index_num && inner_num, .unsigned_flag = 0, .default_stride = true};
+      //     _tensor__embedding_kernel_t param_t = {.shape = param_shape, .stride = {0}, .addr = &param_tensor, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = select_num && inner_num, .unsigned_flag = 0, .default_stride = true};
+      //     index_stride = {index_num, index_num, 1, 1};
+      //     _tensor__embedding_kernel_t index_t = {.shape = index_shape, .stride = index_stride, .addr = &param_tensor, .dtype = DT_UINT32, .mode = 2, .align_mode = 0, .size = select_num && inner_num, .unsigned_flag = 1, .default_stride = true};
+      
+      //     int out_subview_offset = core_idx * index_slice * 2; // 此处的 2 是FP16的字节数，可以后期改成变量
+      //     int index_subview_offset = core_idx * index_slice * 4; // 此处的 4 是UINT32的字节数，可以后期改成变量
+      //     _tensor__embedding_kernel_t out_subview = {.shape = out_slice_shape, .stride = out_stride, .addr = &output_t, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = real_index_slice && inner_num, .unsigned_flag = 0, .default_stride = true};
+      //     scalar_t _scalar_DT_FP16 = tpu_cast(const_val, DT_FP16, DT_FP32, RM_HALF_TO_EVEN);
+      //     if (param_t.size && index_subview.size) {
+      //       tpu_gdma_h_gather_S2S(out_subview.addr, param_t.addr, index_subview.addr, false, _scalar_DT_FP16, &out_subview.shape, &param_t.shape.h, (out_subview.default_stride ? NULL : &out_subview.stride),(param_t.default_stride ? NULL : &param_t.stride),(index_subview.default_stride ? NULL : &index_subview.stride),DT_FP16);
+      //     };
+      //   }
+    }
    else if (op->op.same_as(builtin::if_then_else())) {
     // conditional that skips eval if cond evals to false
     std::string result = name_supply_->FreshName("condval");
@@ -930,32 +1107,33 @@
       PrintType(op->dtype, this->stream);
     }
 
-    this->stream << " " << result << ";\n";
-    this->PrintIndent();
-    this->stream << "if (" << cond << ") {\n";
-    {
-      int then_scope = this->BeginScope();
-      std::string true_val = PrintExpr(op->args[1]);
+      this->stream << " " << result << ";\n";
       this->PrintIndent();
-      this->stream << result << " = " << true_val << ";\n";
-      this->EndScope(then_scope);
-      this->PrintIndent();
-      this->stream << "} else {\n";
+      this->stream << "if (" << cond << ") {\n";
+      {
+        int then_scope = this->BeginScope();
+        std::string true_val = PrintExpr(op->args[1]);
+        this->PrintIndent();
+        this->stream << result << " = " << true_val << ";\n";
+        this->EndScope(then_scope);
+        this->PrintIndent();
+        this->stream << "} else {\n";
+      }
+      {
+        int else_scope = this->BeginScope();
+        std::string false_val = PrintExpr(op->args[2]);
+        this->PrintIndent();
+        this->stream << result << " = " << false_val  << ";\n";
+        this->EndScope(else_scope);
+        this->PrintIndent();
+        this->stream << "}\n";
+      }
+      os << result;
     }
-    {
-      int else_scope = this->BeginScope();
-      std::string false_val = PrintExpr(op->args[2]);
-      this->PrintIndent();
-      this->stream << result << " = " << false_val  << ";\n";
-      this->EndScope(else_scope);
-      this->PrintIndent();
-      this->stream << "}\n";
+    else {
+      CodeGenC::VisitExpr_(op, os);
     }
-    os << result;
   }
-   else {
-     CodeGenC::VisitExpr_(op, os);
-   }
  }
 
  void CodeGenTileLangPPL::VisitStmt_(const LetStmtNode* op) {

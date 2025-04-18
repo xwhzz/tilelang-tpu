@@ -183,46 +183,42 @@ def ppl_div(out, inp1, inp2):
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.div", outptr, inpptr1, inpptr2)
 
+@T.macro
 def ppl_reduce_max(inp, out, dim, clear=True):
-    inpptr = inp.access_ptr("r")
+    inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
-    return T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, dim, clear)
+    T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, dim, clear)
+
+@T.macro
+def ppl_reduce_sum_safe(inp, out, dim):
+    inpptr = inp.access_ptr("rw")
+    outptr = out.access_ptr("rw")
+    with T.block("reduce_sum"):
+        tmp_shape = [inp.shape[0], 32]  # EU数量为32
+        tmp_buffer = T.alloc_shared(tmp_shape, inp.dtype)
+        tmp_ptr = tmp_buffer.access_ptr("rw")
+        eu_num = T.int32(32)
+        channel = T.int32(64)
+        align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num 
+        stride = T.ceildiv(inp.shape[0], channel) * align_w
+        # 调用底层reduce_max实现a
+        T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 def ppl_reduce_sum(inp, out, dim):
-    inpptr = inp.access_ptr("r")
+    assert dim == 1, "Only dim=1 is supported for reduction"
+    return ppl_reduce_sum_safe(inp, out, dim)
+
+
+def ppl_embedding(out, param, index, outer_num, inner_num, select_num, index_num):
+    # 先判断
+    assert outer_num == 1, "Only outer_num=1 is supported for embedding"
+    return ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, index_num)
+
+def ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, index_num):
     outptr = out.access_ptr("rw")
-    en_num = 64
-    inp_shape = list(inp.shape)
-    dim_size = inp_shape[dim]
-    align_dim_size = (dim_size + en_num - 1) // en_num * en_num
-
-    if align_dim_size > dim_size:
-        # 补齐维度
-        # 1.创建一个新的大buffer
-        fill_shape = inp_shape.copy()
-        fill_shape [dim] = align_dim_size
-        filled_inp = T.Buffer(fill_shape, inp.dtype, inp.data)
-
-        # 2.将原buffer拷贝到新buffer
-        T.call_extern("handle", "ppl.copy", inpptr, filled_inp.access_ptr("w"))
-
-        # 3.创建fill区域的子视图
-        fill_starts = [0] * len(fill_shape)
-        fill_starts[dim] = dim_size
-
-        fill_extents = [s for s in fill_shape]
-        fill_extents[dim] = align_dim_size - dim_size
-        
-        fill_regions = []
-        for i, (start, extent) in enumerate(zip(fill_starts, fill_extents)):
-            fill_regions.append(T.Range(start, extent))
-        
-        fill_view = T.BufferRegion(filled_inp, fill_regions)
-
-        # 4.使用fill_view填充新buffer
-        T.call_extern("handle", "ppl.fill", fill_view.access_ptr("w"), 0)
-
-        inpptr = filled_inp.access_ptr("r")
-    tmp_buffer = T.alloc_shared((fill_shape[0], fill_shape[1]), "float32")
-    outptr = out.access_ptr("rw")
-    return T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, inpptr.shape, dim, tmp_buffer.access_ptr("rw"), tmp_buffer.access_ptr("r").shape)
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    with T.block("embedding"):
+        # 这里的const_val是为了避免在调用时传入None，该参数为预留参数，暂未利用。
+        const_val = T.float32(0.0)
+        T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, outer_num, inner_num, select_num, index_num, const_val)
