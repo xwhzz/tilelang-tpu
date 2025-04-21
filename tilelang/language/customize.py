@@ -183,7 +183,12 @@ def ppl_exp2(out, block_M, block_N, dtype): # only support FP32
 def ppl_rsqrt(out, inp):
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("w")
-    return T.call_extern("handle", "ppl.rsqrt", inpptr, outptr)
+    return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
+
+def ppl_add_C(out, inp1, value):
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    return T.call_extern("handle", "ppl.add_C", outptr, inpptr1, value)
 
 def ppl_add(out, inp1, inp2):
     outptr = out.access_ptr("w")

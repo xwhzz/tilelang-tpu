@@ -721,14 +721,16 @@
     auto src0_shape = buffer_shape[src0];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
     std::string dtype;
+    std::string scalar_type;
     if (dtype_ == DataType::Float(16)){
       dtype = "DT_FP16";
+      scalar_type = "f16";
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
+      scalar_type = "f32";
     }
     this->PrintIndent();
-    this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {." << dtype << " = " << value << "};\n";
-    this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << dtype << ");\n";
+    this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  "(scalar_t){." << scalar_type << " = " << value << "}, &" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << dtype << ");\n";
   };
    std::vector<std::string> inst;
    if (op->op.same_as(builtin::call_extern())) {
@@ -850,7 +852,9 @@
       handle_elementwise("tpu_bdc_fp32_div", false);
     } else if (op_name == "ppl.mul_C") {
       handle_elementwise_const("tpu_bdc_fp_mul_C");
-    } 
+    } else if (op_name == "ppl.add_C") {
+      handle_elementwise_const("tpu_bdc_fp_add_C");
+    }
     /** The following op needs to be handled specially. */
     else if (op_name == "ppl.exp") {
       auto work0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
@@ -872,7 +876,12 @@
     } else if (op_name == "ppl.reduce_sum") {
 
     } else if (op_name == "ppl.rsqrt") {
-      
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0_shape = buffer_shape[src0];
+      // void tpu_bdc_fp32_rsqrt(local_addr_t dst_addr, local_addr_t src_addr, const dim4 *shape)
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp32_rsqrt(" << dst << ".addr, " << src0 << ".addr, " << "&" << src0 << ".shape" << ");\n";
     }
 
   }
