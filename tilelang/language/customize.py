@@ -184,12 +184,6 @@ def ppl_div(out, inp1, inp2):
     return T.call_extern("handle", "ppl.div", outptr, inpptr1, inpptr2)
 
 @T.macro
-def ppl_reduce_max(inp, out, dim, clear=True):
-    inpptr = inp.access_ptr("rw")
-    outptr = out.access_ptr("rw")
-    T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, dim, clear)
-
-@T.macro
 def ppl_reduce_sum_safe(inp, out, dim):
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
@@ -209,11 +203,41 @@ def ppl_reduce_sum(inp, out, dim):
     return ppl_reduce_sum_safe(inp, out, dim)
 
 
+@T.macro
+def ppl_reduce_max_safe(inp, out, dim, clear=True):
+    inpptr = inp.access_ptr("rw")
+    outptr = out.access_ptr("rw")
+    if clear:
+        T.call_extern("handle", "ppl.fill", outptr, T.float16(float('-inf')))
+    # 仅支持2D张量和dim=1
+    # assert len(shape) == 2, "Only 2D tensors are supported"
+    # 如果没有提供临时缓冲区，则创建一个
+        # 创建一个临时缓冲区用于中间结果
+        # 注意：这里的32是EU数量，可能需要根据实际情况调整
+    with T.block("reduce_max"):
+        tmp_shape = [inp.shape[0], 32]  # EU数量为32
+        tmp_buffer = T.alloc_shared(tmp_shape, inp.dtype)
+        tmp_ptr = tmp_buffer.access_ptr("rw")
+        eu_num = T.int32(32)  
+        channel = T.int32(64)
+        align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num 
+        stride = T.ceildiv(inp.shape[0], channel) * align_w
+    # 调用底层reduce_max实现a
+        T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+
+def ppl_reduce_max(inp, out, dim, clear=True):
+       # 在函数外部进行检查
+    assert dim == 1, "Only dim=1 is supported"
+       # 调用不含断言的宏函数
+    return ppl_reduce_max_safe(inp, out, dim, clear)
+
+
 def ppl_embedding(out, param, index, outer_num, inner_num, select_num, index_num):
     # 先判断
     assert outer_num == 1, "Only outer_num=1 is supported for embedding"
     return ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, index_num)
 
+@T.macro
 def ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, index_num):
     outptr = out.access_ptr("rw")
     paramptr = param.access_ptr("r")
@@ -221,4 +245,7 @@ def ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, inde
     with T.block("embedding"):
         # 这里的const_val是为了避免在调用时传入None，该参数为预留参数，暂未利用。
         const_val = T.float32(0.0)
+        tmp_buffer = T.alloc_shared(index_num, select_num)
+        tmp_ptr = tmp_buffer.access_ptr("rw")
+
         T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, outer_num, inner_num, select_num, index_num, const_val)
