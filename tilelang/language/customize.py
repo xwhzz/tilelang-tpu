@@ -271,6 +271,27 @@ def ppl_reduce_max(inp, out, dim, clear=True):
     # 调用不含断言的宏函数
     return ppl_reduce_max_safe(inp, out, dim, clear)
 
+
+def ppl_embedding(out, param, index, outer_num, inner_num, select_num, index_num):
+    # 先判断
+    assert outer_num == 1, "Only outer_num=1 is supported for embedding"
+    return ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, index_num)
+
+@T.macro
+def ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, index_num):
+    outptr = out.access_ptr("rw")
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    with T.block("embedding"):
+        params_tmp_buffer = T.alloc_shared([inner_num, select_num], param.dtype)
+        params_tmp_ptr = params_tmp_buffer.access_ptr("rw")
+        output_tmp_buffer = T.alloc_shared([inner_num, index_num], out.dtype)
+        output_tmp_ptr = output_tmp_buffer.access_ptr("rw")
+        # 这里的const_val是为了避免在调用时传入None，该参数为预留参数，暂未利用。
+        const_val = T.float32(0.0)
+        T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, params_tmp_ptr, output_tmp_ptr, outer_num, inner_num, select_num, index_num, const_val)
+
+
 def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     outptr = out.access_ptr("w")
     even_inpptr1 = even_inp1.access_ptr("r")
