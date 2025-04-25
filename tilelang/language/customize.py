@@ -243,9 +243,10 @@ def ppl_embedding_safe(out, param, index, outer_num, inner_num, select_num, inde
     paramptr = param.access_ptr("r")
     indexptr = index.access_ptr("r")
     with T.block("embedding"):
+        params_tmp_buffer = T.alloc_shared([inner_num, select_num], param.dtype)
+        params_tmp_ptr = params_tmp_buffer.access_ptr("rw")
+        output_tmp_buffer = T.alloc_shared([inner_num, index_num], out.dtype)
+        output_tmp_ptr = output_tmp_buffer.access_ptr("rw")
         # 这里的const_val是为了避免在调用时传入None，该参数为预留参数，暂未利用。
         const_val = T.float32(0.0)
-        tmp_buffer = T.alloc_shared(index_num, select_num)
-        tmp_ptr = tmp_buffer.access_ptr("rw")
-
-        T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, outer_num, inner_num, select_num, index_num, const_val)
+        T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, params_tmp_ptr, output_tmp_ptr, outer_num, inner_num, select_num, index_num, const_val)
