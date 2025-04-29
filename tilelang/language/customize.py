@@ -192,3 +192,11 @@ def ppl_reduce_sum(inp, out, dim):
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("rw")
     return T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, dim)
+
+def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
+    outptr = out.access_ptr("w")
+    even_inpptr1 = even_inp1.access_ptr("r")
+    even_inpptr2 = even_inp2.access_ptr("r")
+    odd_inpptr1 = odd_inp1.access_ptr("r")
+    odd_inpptr2 = odd_inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.rope_add", outptr, even_inpptr1, even_inpptr2, odd_inpptr1, odd_inpptr2)

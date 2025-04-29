@@ -69,6 +69,7 @@ from .customize import (
     ppl_reduce_max,  # noqa: F401
     ppl_reduce_sum,  # noqa: F401
     ppl_subtract,  # noqa: F401
+    ppl_rope_add # noqa: F401
 )
 from .builtin import *  # noqa: F401
 

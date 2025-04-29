@@ -720,15 +720,18 @@
     float value = Downcast<FloatImm>(op->args[3])->value;
     auto src0_shape = buffer_shape[src0];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-    std::string dtype;
+    std::string dtype, dtype_s;
     if (dtype_ == DataType::Float(16)){
       dtype = "DT_FP16";
+      dtype_s = "f16";
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
+      dtype_s = "f32";
     }
     this->PrintIndent();
-    this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {." << dtype << " = " << value << "};\n";
-    this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << dtype << ");\n";
+    this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {." << dtype_s << " = " << "(float)" << value << "};\n";
+    this->PrintIndent();
+    this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), " <<  dtype << ");\n";
   };
    std::vector<std::string> inst;
    if (op->op.same_as(builtin::call_extern())) {
@@ -852,6 +855,37 @@
       handle_elementwise_const("tpu_bdc_fp_mul_C");
     } 
     /** The following op needs to be handled specially. */
+    else if (op_name == "ppl.rope_add") {
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto even_src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto even_src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto odd_src0 = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
+      auto odd_src1 = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)){
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      }
+      this->PrintIndent();
+      this->stream << "dim4 half_stride;\n";
+      this->PrintIndent();
+      this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "half_stride.w *= 2;\n";
+      this->PrintIndent();
+      // this->stream << "dim4 half_shape = " << dst << ".shape" << ";\n";
+      this->stream << "dim4 half_shape = {.n = " << dst << ".shape.n, .c = " << dst << ".shape.c, .h = " << dst << ".shape.h, .w = " << dst << ".shape.w};\n";
+      this->PrintIndent();
+      this->stream << "half_shape.w /= 2;\n";
+      // tpu_bdc_fp_add( out.addr, x_cos.addr, x_neg_sin.addr + DtypeSize(DT_FP32), &half_shape, &half_stride, &half_stride, &half_stride, DT_FP32);
+      // tpu_bdc_fp_add( out.addr + DtypeSize(DT_FP32), x_cos.addr + DtypeSize(DT_FP32), x_sin.addr, &half_shape, &half_stride, &half_stride, &half_stride, DT_FP32);
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_add( " << dst << ".addr, " << even_src0 << ".addr, " << even_src1 << ".addr + DtypeSize(" << dtype << "), " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_add( " << dst << ".addr + DtypeSize(" << dtype << "), " << odd_src0 << ".addr + DtypeSize(" << dtype << "), " << odd_src1 << ".addr, " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
+    }
     else if (op_name == "ppl.exp2") {
       
     } else if (op_name == "ppl.reduce_max") {
