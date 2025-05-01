@@ -28,8 +28,8 @@ def reduce_sum(M, N, block_M, block_N, dtype="float32", accum_dtype="float32"):
 func = reduce_sum(8192, 8192, 512, 8192)
 mod = tilelang.lower(func)
 script_dir = os.path.dirname(os.path.abspath(__file__))
-reduce_sum_ir = os.path.join(script_dir, "reduce_max_ir.py")
-reduce_max_kernel = os.path.join(script_dir, "reduce_max_kernel.c")
+reduce_sum_ir = os.path.join(script_dir, "reduce_sum_ir.py")
+reduce_max_kernel = os.path.join(script_dir, "reduce_sum_kernel.c")
 with open(reduce_sum_ir, "w") as f:
     f.write(str(func))
 with open(reduce_max_kernel, "w") as f:
