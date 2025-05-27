@@ -8,7 +8,7 @@ import tilelang
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
-    disable pass(TODO: need verfiy):
+    disable pass(TODO: need verify):
         layout inference
         lower Tile op
         safememory

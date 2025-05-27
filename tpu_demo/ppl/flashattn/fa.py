@@ -6,6 +6,7 @@ import tilelang.language as T
 
 T.copy = T.ppl_copy
 
+
 def flashattn(batch, heads, seq_len, dim, is_causal):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
@@ -59,15 +60,15 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
             T.ppl_mul_C(scores_scale, scores_scale, scale)
             work0 = T.alloc_shared([block_M, 1], accum_dtype)
             work1 = T.alloc_shared([block_M, 1], accum_dtype)
-            coeff = T.alloc_shared([64, 32], accum_dtype) # npu number is 64
-            table = T.alloc_shared([64, 192], accum_dtype) # npu number is 64
+            coeff = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
+            table = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
             T.ppl_exp2(scores_scale, work0, work1, coeff, table)
             T.ppl_subtract(acc_s, acc_s, scores_max)
             T.ppl_mul_C(acc_s, acc_s, scale)
             work0_1 = T.alloc_shared([block_M, block_N], accum_dtype)
             work1_1 = T.alloc_shared([block_M, block_N], accum_dtype)
-            coeff_1 = T.alloc_shared([64, 32], accum_dtype) # npu number is 64
-            table_1 = T.alloc_shared([64, 192], accum_dtype) # npu number is 64
+            coeff_1 = T.alloc_shared([64, 32], accum_dtype)  # npu number is 64
+            table_1 = T.alloc_shared([64, 192], accum_dtype)  # npu number is 64
             T.ppl_exp2(acc_s, work0_1, work1_1, coeff_1, table_1)
             T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
             T.ppl_mul(logsum, logsum, scores_scale)
@@ -83,8 +84,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
             # for i, j in T.Parallel(block_M, dim):
             #     acc_o[i, j] *= scores_scale[i]
             # bdcast
-            T.ppl_mul(acc_o, acc_o,scores_scale)
-            
+            T.ppl_mul(acc_o, acc_o, scores_scale)
+
         @T.prim_func
         def main(
                 Q: T.Tensor(shape, dtype),
@@ -92,9 +93,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
                 V: T.Tensor(shape, dtype),
                 Output: T.Tensor(shape, dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, is_cpu=True) as (bx, by, bz):
-                Q_shared = T.alloc_shared([block_M, dim], dtype) # 1, block_m, 1, dim
+            with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, is_cpu=True) as (bx, by, bz):
+                Q_shared = T.alloc_shared([block_M, dim], dtype)  # 1, block_m, 1, dim
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
                 O_shared = T.alloc_shared([block_M, dim], dtype)
@@ -107,10 +107,10 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
                 scores_scale = T.alloc_shared([block_M, 1], accum_dtype)
                 scores_sum = T.alloc_shared([block_M, 1], accum_dtype)
                 logsum = T.alloc_shared([block_M, 1], accum_dtype)
-                T.copy(Q[bz, bx * block_M: (bx + 1) * block_M, by, :], Q_shared)
+                T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
 
                 T.ppl_fill(acc_o, T.float32(0))
-                T.ppl_fill(logsum,T.float32(0))
+                T.ppl_fill(logsum, T.float32(0))
                 T.ppl_fill(scores_max, -T.infinity(accum_dtype))
 
                 loop_range = (
@@ -131,8 +131,9 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
 
     def kernel(block_M, block_N, num_stages, threads):
         return kernel_func(block_M, block_N, num_stages, threads)
+
     return kernel
 
 
-func =  flashattn(1, 2, 4, 8, False)(2, 2, 0, 16)
+func = flashattn(1, 2, 4, 8, False)(2, 2, 0, 16)
 mod = tilelang.lower(func)

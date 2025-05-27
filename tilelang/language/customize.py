@@ -6,8 +6,6 @@ import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, BufferRegion, BufferLoad
 from typing import List, Union
 from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
-import time
-import hashlib
 
 
 def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
@@ -99,7 +97,6 @@ def view(src: Buffer,
     return T.Buffer(shape, dtype, src.data)
 
 
-
 def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
     Aptr = A.access_ptr("r")
     Bptr = B.access_ptr("r")
@@ -126,10 +123,10 @@ def ppl_copy(
             print(data.indices)
         else:
             return None
+
     print(type(src))
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
-
 
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
@@ -154,16 +151,19 @@ def ppl_fill(buffer, value):
     buffer = buffer.access_ptr("w")
     return T.call_extern("handle", "ppl.fill", buffer, value)
 
+
 def ppl_subtract(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.sub", outptr, inpptr1, inpptr2)
 
+
 def ppl_mul_C(out, inp1, value):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     return T.call_extern("handle", "ppl.mul_C", outptr, inpptr1, value)
+
 
 def ppl_mul(out, inp1, inp2):
     outptr = out.access_ptr("w")
@@ -171,14 +171,17 @@ def ppl_mul(out, inp1, inp2):
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
+
 @T.macro
-def ppl_exp2(out, work0, work1, coeff, table): # only support FP32
+def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
     buffer = out.access_ptr("rw")
     work0ptr = work0.access_ptr("rw")
     work1ptr = work1.access_ptr("rw")
     coeffptr = coeff.access_ptr("rw")
     tableptr = table.access_ptr("rw")
     T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
+
+
 # def ppl_exp2(out, block_M, block_N, dtype): # only support FP32
 #     buffer = out.access_ptr("rw")
 #     work0 = T.alloc_shared([block_M, block_N], dtype)
@@ -191,15 +194,18 @@ def ppl_exp2(out, work0, work1, coeff, table): # only support FP32
 #     tableptr = table.access_ptr("rw")
 #     T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
 
+
 def ppl_rsqrt(out, inp):
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("w")
     return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
 
+
 def ppl_add_C(out, inp1, value):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     return T.call_extern("handle", "ppl.add_C", outptr, inpptr1, value)
+
 
 def ppl_add(out, inp1, inp2):
     outptr = out.access_ptr("w")
@@ -207,11 +213,13 @@ def ppl_add(out, inp1, inp2):
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.add", outptr, inpptr1, inpptr2)
 
+
 def ppl_div(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.div", outptr, inpptr1, inpptr2)
+
 
 @T.macro
 def ppl_reduce_sum_safe(inp, out, dim):
@@ -223,14 +231,16 @@ def ppl_reduce_sum_safe(inp, out, dim):
         tmp_ptr = tmp_buffer_sum.access_ptr("rw")
         eu_num = T.int32(32)
         channel = T.int32(64)
-        align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num 
+        align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
         # 调用底层reduce_max实现a
         T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
+
 def ppl_reduce_sum(inp, out, dim):
     assert dim == 1, "Only dim=1 is supported for reduction"
     return ppl_reduce_sum_safe(inp, out, dim)
+
 
 @T.macro
 def ppl_reduce_max_safe(inp, out, dim, clear=True):
@@ -241,21 +251,22 @@ def ppl_reduce_max_safe(inp, out, dim, clear=True):
     # 仅支持2D张量和dim=1
     # assert len(shape) == 2, "Only 2D tensors are supported"
     # 如果没有提供临时缓冲区，则创建一个
-        # 创建一个临时缓冲区用于中间结果
-        # 注意：这里的32是EU数量，可能需要根据实际情况调整
+    # 创建一个临时缓冲区用于中间结果
+    # 注意：这里的32是EU数量，可能需要根据实际情况调整
     with T.block("reduce_max"):
         tmp_shape = [inp.shape[0], 32]  # EU数量为32
         tmp_buffer_max = T.alloc_shared(tmp_shape, inp.dtype)
         tmp_ptr = tmp_buffer_max.access_ptr("rw")
-        eu_num = T.int32(32)  
+        eu_num = T.int32(32)
         channel = T.int32(64)
-        align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num 
+        align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num
         stride = T.ceildiv(inp.shape[0], channel) * align_w
-    # 调用底层reduce_max实现a
+        # 调用底层reduce_max实现a
         T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
+
 def ppl_reduce_max(inp, out, dim, clear=True):
-       # 在函数外部进行检查
+    # 在函数外部进行检查
     assert dim == 1, "Only dim=1 is supported"
-       # 调用不含断言的宏函数
+    # 调用不含断言的宏函数
     return ppl_reduce_max_safe(inp, out, dim, clear)
