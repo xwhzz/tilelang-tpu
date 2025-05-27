@@ -27,8 +27,10 @@ nnfusion.tar.gz
 tmp/
 
 venv/
+.venv/
 .vscode/
 .vs/
+.env
 
 # VisualGDB files
 VisualGDB/

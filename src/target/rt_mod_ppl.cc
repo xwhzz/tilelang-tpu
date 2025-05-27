@@ -30,7 +30,8 @@ std::string BuildTileLangPPL(IRModule mod) {
   cg.Init(output_ssa);
 
   for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>()) << "CodeGenTileLangPPL: Can only take PrimFunc";
+    ICHECK(kv.second->IsInstance<PrimFuncNode>())
+        << "CodeGenTileLangPPL: Can only take PrimFunc";
     auto f = Downcast<PrimFunc>(kv.second);
     // auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     // ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
@@ -43,9 +44,9 @@ std::string BuildTileLangPPL(IRModule mod) {
   // return runtime::CUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
 }
 
-
-TVM_REGISTER_GLOBAL("target.build.tilelang_ppl").set_body_typed(BuildTileLangPPL);
+TVM_REGISTER_GLOBAL("target.build.tilelang_ppl")
+    .set_body_typed(BuildTileLangPPL);
 // TVM_REGISTER_GLOBAL("target.build.tl_debug_codegen").set_body_typed(BuildTLDebug);
 
-}  // namespace codegen
-}  // namespace tvm
+} // namespace codegen
+} // namespace tvm

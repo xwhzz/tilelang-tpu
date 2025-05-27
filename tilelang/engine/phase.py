@@ -8,7 +8,7 @@ import tilelang
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
-    disable pass(TODO: need verfiy):
+    disable pass(TODO: need verify):
         layout inference
         lower Tile op
         safememory
@@ -19,6 +19,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.FrontendLegalize()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
+    print(mod)
     # Infer memory layouts for fragments and shared memory
     # mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations

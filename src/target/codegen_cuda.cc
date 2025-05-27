@@ -42,13 +42,13 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kE4M3Float) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kE5M2Float) {
-    stream << "fp8_e5" << vec << "_t";
-  } else {
-    LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
-  }
+  // if (type.code() == DataType::kE4M3Float) {
+  //   stream << "fp8_e4" << vec << "_t";
+  // } else if (type.code() == DataType::kE5M2Float) {
+  //   stream << "fp8_e5" << vec << "_t";
+  // } else {
+  //   LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
+  // }
   return stream.str();
 }
 
