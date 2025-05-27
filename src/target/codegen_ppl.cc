@@ -684,7 +684,7 @@
       this->PrintIndent();
       this->stream << "tpu_aligned_stride(&" << src1 << "_stride, 0, &" << src1 << ".shape, " << dtype << ");\n";
       this->PrintIndent();
-      this->stream << src1 << "_stride[3] = 0;\n"; 
+      this->stream << src1 << "_stride.w = 0;\n"; 
       src1_stride << "&" << src1 << "_stride, ";
     } else if (src1_shape[1]==src0_shape[1]) {
       src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1 << ".stride), ";
@@ -695,7 +695,7 @@
   auto handle_elementwise = [&, this](std::string op_name, bool has_dtype) {
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-    auto src1= var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+    auto src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
     auto dst_shape = buffer_shape[dst];
     auto src0_shape = buffer_shape[src0];
     auto src1_shape = buffer_shape[src1];
@@ -774,13 +774,14 @@
           auto strides = buffer_stride[src_buffer->name];
           src_strides = vector2string(strides);
           std::string min_expr;
-          std::vector<int> stride_map = {1, 3};
-          for (int i=0; i < src_ranges.size(); i++){
+          for (int i = 0; i < src_ranges.size(); i++){
             auto sr = src_ranges[i];
-            min_expr += "("+PrintExpr(sr->min) + ") * " + std::to_string(strides[stride_map[i]]) + "+";
+            const PrimExpr& e = sr->min;
+            min_expr += "(" + PrintExpr(e) + ") * " + std::to_string(strides[i]) + "+";
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
+          std::cout << min_expr << std::endl;
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape + ", .stride = " + src_strides +", .addr = " + src_id + ".addr + " + min_expr +", .dtype = " + dtype + ", .mode = 2, .size = 1, .offset = " + min_expr + ", .unsigned_flag = 0, .default_stride = false};\n");
         } else if (src_buffer.scope() == "shared.dyn") {
 
@@ -788,29 +789,40 @@
         }
         return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
       };
+      tvm::Dump(op);
       tl::RegionOp src = tl::RegionOp(op->args[1].as<CallNode>()->args, buffer_map); 
+      // tvm::Dump(src);
       tl::RegionOp dst = tl::RegionOp(op->args[2].as<CallNode>()->args, buffer_map);
       auto [src_var_id, src_flag, src_dtype] = process_copy(src);
       auto [dst_var_id, dst_flag, dst_dtype] = process_copy(dst);
       std::string ppl_inst;
       if (src_dtype != dst_dtype){
-        // LOG(FATAL) << "Unsupported copy from " << src_dtype << " to " << dst_dtype;
-        // TODO: need to call tpu cast instruction.
+        // void tpu_bdc_cast(local_addr_t dst_addr, local_addr_t src_addr, const dim4 *shape, const dim4 *dst_stride, const dim4 *src_stride, data_type_t dst_dtype, data_type_t src_dtype, rounding_mode_t mode)
+        // 使用RM_HALF_TO_EVEN舍入模式，只有在浮点数据类型参与的转换时使用
+        ppl_inst += "tpu_bdc_cast(" + dst_var_id + ".addr, " + src_var_id + ".addr, " + "&" + dst_var_id + ".shape, " + "(" + dst_var_id + ".default_stride ? NULL : &" + dst_var_id + ".stride), "
+        + "(" + src_var_id + ".default_stride ? NULL : &" + src_var_id + ".stride), " + dst_dtype + ", " + src_dtype + ", " + "RM_HALF_TO_EVEN" + ");\n";
+        inst.push_back(ppl_inst);
+        for(auto& i : inst){
+          this->PrintIndent();
+          this->stream << i;
+        }
       }
-      if (src_flag == "global" && dst_flag == "shared.dyn"){
-        ppl_inst += "tpu_gdma_cpy_S2L";
-      } else if (src_flag == "shared.dyn" && dst_flag == "global") {
-        ppl_inst += "tpu_gdma_cpy_L2S";
-      } else { 
-        // TODO: add other copy directions, like local mem -> local mem.
-        ppl_inst += "mv";
-      }
+      else{
+        if (src_flag == "global" && dst_flag == "shared.dyn"){
+          ppl_inst += "tpu_gdma_cpy_S2L";
+        } else if (src_flag == "shared.dyn" && dst_flag == "global") {
+          ppl_inst += "tpu_gdma_cpy_L2S";
+        } else { 
+          // local mem -> local mem copy within the same NPU
+          ppl_inst += "tpu_bdc_cpy";
+        }
   
-      ppl_inst += "(" + dst_var_id + ".addr, " + src_var_id + ".addr, &" + dst_var_id + ".shape, " + "(" + dst_var_id + ".default_stride ? NULL : &" + dst_var_id + ".stride), " + "(" + src_var_id + ".default_stride ? NULL : &" + src_var_id + ".stride), " + src_dtype + ");\n";
-      inst.push_back(ppl_inst);
-      for(auto& i : inst){
-        this->PrintIndent();
-        this->stream << i;
+        ppl_inst += "(" + dst_var_id + ".addr, " + src_var_id + ".addr, &" + dst_var_id + ".shape, " + "(" + dst_var_id + ".default_stride ? NULL : &" + dst_var_id + ".stride), " + "(" + src_var_id + ".default_stride ? NULL : &" + src_var_id + ".stride), " + src_dtype + ");\n";
+        inst.push_back(ppl_inst);
+        for(auto& i : inst){
+          this->PrintIndent();
+          this->stream << i;
+        }
       }
     } else if (op_name == "ppl.fill") {
       auto var_ = op->args[1].as<CallNode>()->args[1].as<VarNode>();
@@ -838,10 +850,13 @@
       auto M = Downcast<IntImm>(op->args[6])->value;
       auto N = Downcast<IntImm>(op->args[7])->value;
       auto K = Downcast<IntImm>(op->args[8])->value;
+      auto trans_B = Downcast<Bool>(op->args[5])->value;
       std::string M_K_N = std::to_string(M) + ", " + std::to_string(K) + ", " + std::to_string(N);
       this->PrintIndent();
-
-      this->stream << "tpu_bdc_fp_mm("<< c_access_data << ".addr, "<< a_access_data << ".addr, " << b_access_data<< ".addr,"<< M_K_N << ", DT_FP32, DT_FP16, true);\n";
+      if (!trans_B)
+        this->stream << "tpu_bdc_fp_mm("<< c_access_data << ".addr, "<< a_access_data << ".addr, " << b_access_data<< ".addr,"<< M_K_N << ", DT_FP32, DT_FP16, true);\n";
+      else
+        this->stream << "tpu_bdc_fp_mm_R_trans("<< c_access_data << ".addr, "<< a_access_data << ".addr, " << b_access_data<< ".addr,"<< M_K_N << ", DT_FP32, DT_FP16);\n";
     } else if (op_name == "ppl.sub") {
       handle_elementwise("tpu_bdc_fp_sub", true);
     } else if (op_name == "ppl.mul") {
@@ -849,7 +864,7 @@
     } else if (op_name == "ppl.add") {
       handle_elementwise("tpu_bdc_fp_add", true);
     } else if (op_name == "ppl.div") {
-      handle_elementwise("tpu_bdc_fp32_div", false);
+      handle_elementwise("tpu_bdc_fp_div", true);
     } else if (op_name == "ppl.mul_C") {
       handle_elementwise_const("tpu_bdc_fp_mul_C");
     } else if (op_name == "ppl.add_C") {
@@ -872,9 +887,312 @@
       this->PrintIndent();
       this->stream << "tpu_bdc_fp32_exp(" << dst << ".addr, " << src0 << ".addr, " << work0 << ".addr, " << work1 << ".addr, " << coeff << ".addr, " << table << ".addr, " << "&" << src0 << ".shape" << ");\n";
     } else if (op_name == "ppl.reduce_max") {
+      // 提取输入、输出和临时张量
+      auto input_tensor = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto output_tensor = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto tmp_tensor = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto eu_num = Downcast<IntImm>(op->args[4])->value;
+      auto align_w = Downcast<IntImm>(op->args[5])->value;
+      auto stride_n = Downcast<IntImm>(op->args[6])->value;
+      // 获取数据类型
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)){
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      }
+      
+      this->PrintIndent(); 
+      int sid = this->BeginScope();  
+      this->stream << "{\n";  
 
+      // 计算EU数和对齐尺寸
+      this->PrintIndent();
+      this->stream << "int eu_num = " << eu_num << ";\n";
+      this->PrintIndent();
+      this->stream << "int align_w = " << align_w << ";\n";
+      
+      // 创建pad_val
+      this->PrintIndent();
+      this->stream << "scalar_t pad_val = {." 
+                  << (dtype_ == DataType::Float(16) ? "f16" : "f16") 
+                  << " = FP_NEG_MAX(" << dtype << ")};\n";
+      
+      // 判断是否需要填充 - 只有在宽度不是EU数的倍数时才需要填充
+      this->PrintIndent();
+      this->stream << "if (align_w > " << input_tensor << ".shape.w) {\n";
+      
+      // 计算填充区域大小和偏移
+      this->PrintIndent();
+      this->stream << "  dim4 fill_shape = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, align_w - " << input_tensor << ".shape.w};\n";
+      this->PrintIndent();
+      this->stream << "  int elem_size = " << (dtype_ == DataType::Float(16) ? "2" : "4") << ";\n";
+      this->PrintIndent();
+      this->stream << "  int offset = " << input_tensor << ".shape.w * elem_size;\n";
+      this->PrintIndent();
+      this->stream << "  dim4 fill_tensor_stride = {" << stride_n << ", align_w, " 
+                  << input_tensor << ".shape.w, 1};\n";
+      
+      // 创建填充视图 
+      this->PrintIndent();
+      this->stream << "  __ppl_tensor_info fill_tensor = {.shape = fill_shape, .stride = fill_tensor_stride, "
+                  << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
+                  << ".unsigned_flag = 0, .default_stride = false};\n";
+      
+      // 填充
+      this->PrintIndent();
+      this->stream << "  tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
+                  << "(fill_tensor.default_stride ? NULL : &fill_tensor.stride), " << dtype << ");\n";
+      
+      this->PrintIndent();
+      this->stream << "}\n";
+      
+      // 创建池化所需的形状
+      this->PrintIndent();
+      this->stream << "dim4 in_reduce_h = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, align_w / eu_num, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 out_reduce_h = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 in_reduce_w = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 out_reduce_w = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, 1};\n";
+      
+      // 设置池化参数
+      this->PrintIndent();
+      this->stream << "dim2 kernel = {align_w / eu_num, 1};\n";
+      this->PrintIndent();
+      this->stream << "padding_t pad = {0, 0, 0, 0};\n";
+      this->PrintIndent();
+      this->stream << "dim2 stride = {1, 1};\n";
+      this->PrintIndent();
+      this->stream << "dim2 dilation = {1, 1};\n";
+      
+      // 创建输入和临时视图
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info input_view = {.shape = in_reduce_h, .stride = {0}, "
+                  << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info tmp_view = {.shape = out_reduce_h, .stride = {0}, "
+                  << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      // 第一次最大池化
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_max_pool2d(tmp_view.addr, input_view.addr, &input_view.shape, "
+                  << "&kernel, &pad, &stride, &dilation, " << dtype << ", pad_val);\n";
+      
+      // 修改kernel大小
+      this->PrintIndent();
+      this->stream << "dim2 kernel2 = {1, eu_num};\n";
+      
+      // 创建输出视图 - 更紧凑的格式
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info output_view = {.shape = out_reduce_w, .stride = {0}, "
+                  << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, .stride = {0}, "
+                  << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      // 重置pad_val
+      this->PrintIndent();
+      this->stream << "pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
+      
+      // 第二次最大池化
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, "
+                  << "&kernel2, &pad, &stride, &dilation, " << dtype << ", pad_val);\n";
+
+      // 结束块作用域
+      this->EndScope(sid);
+      this->PrintIndent();  
+      this->stream << "}\n"; 
     } else if (op_name == "ppl.reduce_sum") {
+      // 提取输入、输出和临时张量
+      auto input_tensor = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto output_tensor = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto tmp_tensor = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto eu_num = Downcast<IntImm>(op->args[4])->value;
+      auto align_w = Downcast<IntImm>(op->args[5])->value;
+      auto stride_n = Downcast<IntImm>(op->args[6])->value;
+      
+      this->PrintIndent(); 
+      int sid = this->BeginScope();  
+      this->stream << "{\n";  
+            
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype, dtype_2;
+      if (dtype_ == DataType::Float(16)){
+        dtype = "DT_FP16";
+        dtype_2 = "f16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+        dtype_2 = "f32";
+      } else if (dtype_ == DataType::Int(32)) {
+        dtype = "DT_INT32";
+        dtype_2 = "s32";
+      }else if (dtype_ == DataType::UInt(32)) {
+        dtype = "DT_UINT32";
+        dtype_2 = "u32";
+      }else if (dtype_ == DataType::Int(16)) {
+        dtype = "DT_INT16";
+        dtype_2 = "s16";
+      } else {
+        LOG(FATAL) << "Unsupported dtype " << dtype_;
+      }
+      // 计算EU数和对齐尺寸
+      this->PrintIndent();
+      this->stream << "int eu_num = "<<eu_num<<";\n";
+      this->PrintIndent();
+      this->stream << "int align_w = " << align_w << ";\n";
+      
+      // // 创建填充值（对于sum，使用0作为填充值）
+      this->PrintIndent();
+      this->stream << "scalar_t pad_val = {." 
+                  << dtype_2 
+                  << " = 0};\n";
 
+      // 判断是否需要填充 - 只有在宽度不是EU数的倍数时才需要填充
+      this->PrintIndent();
+      this->stream << "if (align_w > " << input_tensor << ".shape.w) {\n";
+
+      // 计算填充区域大小和偏移
+      this->PrintIndent();
+      this->stream << "  dim4 fill_shape = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, align_w - " << input_tensor << ".shape.w};\n";
+      this->PrintIndent();
+      int elem_size = 1;
+      if (dtype_ == DataType::Float(16)) {
+        elem_size = 2;
+      } else if (dtype_ == DataType::Float(32)) {
+        elem_size = 4;
+      } else if (dtype_ == DataType::Int(32)) {
+        elem_size = 4;
+      } else if (dtype_ == DataType::UInt(32)) {
+        elem_size = 4;
+      } else if (dtype_ == DataType::Int(16)) {
+        elem_size = 2;
+      } else {
+        LOG(FATAL) << "Unsupported dtype " << dtype_;
+      }
+      this->stream << "  int elem_size = " << elem_size << ";\n";
+      this->PrintIndent();
+      this->stream << "  int offset = " << input_tensor << ".shape.w * elem_size;\n";
+      this->PrintIndent();
+      this->stream << "  dim4 fill_tensor_stride = {" << stride_n << ", align_w, " 
+                  << input_tensor << ".shape.w, 1};\n";
+
+      // 创建填充视图 
+      this->PrintIndent();
+      this->stream << "  __ppl_tensor_info fill_tensor = {.shape = fill_shape, .stride = fill_tensor_stride, "
+                  << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 4, .size = 1, .offset = offset, "
+                  << ".unsigned_flag = 0, .default_stride = false};\n";
+
+      // 填充
+      this->PrintIndent();
+      this->stream << "  tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
+                  << "(fill_tensor.default_stride ? NULL : &fill_tensor.stride), " << dtype << ");\n";
+      
+      this->PrintIndent();
+      this->stream << "}\n";
+      
+      // 创建池化所需的形状
+      this->PrintIndent();
+      this->stream << "dim4 in_reduce_h = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, align_w / eu_num, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 out_reduce_h = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 in_reduce_w = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, eu_num};\n";
+      this->PrintIndent();
+      this->stream << "dim4 out_reduce_w = {" << input_tensor << ".shape.n, " 
+                  << input_tensor << ".shape.c, 1, 1};\n";
+
+      // 设置池化参数
+      this->PrintIndent();
+      this->stream << "dim2 kernel = {align_w / eu_num, 1};\n";
+      this->PrintIndent();
+      this->stream << "padding_t pad = {0, 0, 0, 0};\n";
+      this->PrintIndent();
+      this->stream << "dim2 stride = {1, 1};\n";
+      this->PrintIndent();
+      this->stream << "dim2 dilation = {1, 1};\n";
+
+      // 创建输入和临时视图
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info input_view = {.shape = in_reduce_h, .stride = {0}, "
+                  << ".addr = " << input_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info tmp_view = {.shape = out_reduce_h, .stride = {0}, "
+                  << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+
+      this->PrintIndent();
+      this->stream << "scalar_t scale = {.f32 = (float)1.000000000e+00};\n";
+      if (dtype_ == DataType::Float(16)) {
+        this->PrintIndent(); 
+        this->stream << "scale = tpu_cast(scale, DT_FP16, DT_FP32, RM_HALF_TO_EVEN);\n";
+      } else if (dtype_ == DataType::Int(32)) {
+        this->PrintIndent(); 
+        this->stream << "scale = tpu_cast(scale, DT_INT32, DT_FP32, RM_HALF_TO_EVEN);\n"; // todo
+      } else if (dtype_ == DataType::UInt(32)) {
+        this->PrintIndent(); 
+        this->stream << "scale = tpu_cast(scale, DT_UINT32, DT_FP32, RM_HALF_TO_EVEN);\n"; // todo
+      }
+      // 第一次均值池化（通过设置scale实现求和）
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, &input_view.shape, "
+                  << "&kernel, &pad, &stride, &dilation, " << dtype << ", scale);\n";
+
+      // 修改kernel大小
+      this->PrintIndent();
+      this->stream << "dim2 kernel2 = {1, eu_num};\n";
+      
+      // 创建输出视图 - 更紧凑的格式
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info output_view = {.shape = out_reduce_w, .stride = {0}, "
+                  << ".addr = " << output_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      this->PrintIndent();
+      this->stream << "__ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, .stride = {0}, "
+                  << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype << ", "
+                  << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                  << ".unsigned_flag = 0, .default_stride = true};\n";
+      
+      // 第二次均值池化（通过设置scale实现求和）
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, "
+                  << "&kernel2, &pad, &stride, &dilation, " << dtype << ", scale);\n";
+      // this->indent_ -= 2;
+
+      // 结束块作用域
+      this->EndScope(sid);
+      this->PrintIndent();  
+      this->stream << "}\n"; 
     } else if (op_name == "ppl.rsqrt") {
       auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
       auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
@@ -891,38 +1209,39 @@
     std::string cond = PrintExpr(op->args[0]);
     this->PrintIndent();
 
-    // TODO: (xwh)
-
-    std::string op_1_name_ = Downcast<Var>(op->args[1])->name_hint;
-    if (op_1_name_.find("shared") != std::string::npos) {
-      this->stream << "__ppl_tensor_info ";
+    // remove hard code "shared"
+    if (auto var = op->args[1].as<VarNode>()) {
+      auto search = buffer_addrs_.find(var);
+      if (search != buffer_addrs_.end()) {
+        this->stream << "__ppl_tensor_info ";
+      }
     } else {
       PrintType(op->dtype, this->stream);
     }
 
-    this->stream << " " << result << ";\n";
-    this->PrintIndent();
-    this->stream << "if (" << cond << ") {\n";
-    {
-      int then_scope = this->BeginScope();
-      std::string true_val = PrintExpr(op->args[1]);
+      this->stream << " " << result << ";\n";
       this->PrintIndent();
-      this->stream << result << " = " << true_val << ";\n";
-      this->EndScope(then_scope);
-      this->PrintIndent();
-      this->stream << "} else {\n";
+      this->stream << "if (" << cond << ") {\n";
+      {
+        int then_scope = this->BeginScope();
+        std::string true_val = PrintExpr(op->args[1]);
+        this->PrintIndent();
+        this->stream << result << " = " << true_val << ";\n";
+        this->EndScope(then_scope);
+        this->PrintIndent();
+        this->stream << "} else {\n";
+      }
+      {
+        int else_scope = this->BeginScope();
+        std::string false_val = PrintExpr(op->args[2]);
+        this->PrintIndent();
+        this->stream << result << " = " << false_val  << ";\n";
+        this->EndScope(else_scope);
+        this->PrintIndent();
+        this->stream << "}\n";
+      }
+      os << result;
     }
-    {
-      int else_scope = this->BeginScope();
-      std::string false_val = PrintExpr(op->args[2]);
-      this->PrintIndent();
-      this->stream << result << " = " << false_val  << ";\n";
-      this->EndScope(else_scope);
-      this->PrintIndent();
-      this->stream << "}\n";
-    }
-    os << result;
-  }
    else {
      CodeGenC::VisitExpr_(op, os);
    }
@@ -1182,9 +1501,14 @@ return;
         buffer_shape[buffer_node->name].push_back(s.as<IntImmNode>()->value);
       }
       default_stride(buffer_node->name);
-      for (auto s: shape) {
-        shape_s += std::to_string(s.as<IntImmNode>()->value);
-        tensor_size *= s.as<IntImmNode>()->value;
+      // 用下标循环来拼接带逗号的字符串
+      for (size_t i = 0; i < shape.size(); ++i) {
+        int dim_i = shape[i].as<IntImmNode>()->value;
+        shape_s += std::to_string(dim_i);
+        tensor_size *= dim_i;
+        if (i + 1 < shape.size()) {
+          shape_s += ", ";
+        }
       }
     }
 

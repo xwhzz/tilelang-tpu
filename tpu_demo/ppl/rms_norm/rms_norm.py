@@ -27,5 +27,5 @@ def rms_norm(M, N, blk_m, dtype):
     return main
 
 dtype = "float"
-func = rms_norm(8192, 8192, 512, dtype)
+func = rms_norm(2048, 2048, 64, dtype)
 mod = tilelang.lower(func)

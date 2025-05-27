@@ -30,6 +30,7 @@ venv/
 .venv/
 .vscode/
 .vs/
+.env
 
 # VisualGDB files
 VisualGDB/
