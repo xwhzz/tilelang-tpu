@@ -30,7 +30,7 @@ def matmul(M, N, K, block_M, block_N, block_K, stage, dtype="float16", accum_dty
 
 
 # func =  matmul(4096, 8192, 1024, 1024, 512, 128, 2)
-func = matmul(384, 786, 786, 128, 128, 128, 2)
+func =  matmul(384, 768, 768, 128, 128, 128, 2)
 mod = tilelang.lower(func)
 
 # for mm in range(64,4097,64):
