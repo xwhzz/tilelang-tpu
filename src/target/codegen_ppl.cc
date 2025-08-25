@@ -844,12 +844,18 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           for (int i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
             const PrimExpr &e = sr->min;
+            std::string idx_str;
+            if (const RampNode* ramp = e.as<RampNode>()) { // 如果是Ramp，只取base部分
+              idx_str = PrintExpr(ramp->base);
+            } else { // 否则直接打印整个表达式
+              idx_str = PrintExpr(e);
+            }
             min_expr +=
-                "(" + PrintExpr(e) + ") * " + std::to_string(strides[i]) + "+";
+                "(" + idx_str + ") * " + std::to_string(strides[stride_map[i]]) + "+";
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-          std::cout << min_expr << std::endl;
+          std::cout << "min_expr: " << min_expr << std::endl;
           inst.push_back("__ppl_tensor_info " + new_src_var +
                          " = {.shape = " + src_shape +
                          ", .stride = " + src_strides + ", .addr = " + src_id +
