@@ -71,15 +71,28 @@
  }
  
  std::string CodeGenTileLangPPL::Finish() {
-     decl_stream << "#include \"ppl_helper.h\"\n";
-     decl_stream << "static data_type_t __ppl_get_dtype(int type) {\n" <<
-         "  data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,\n" <<
-         "    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,\n" <<
-         "    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,\n" <<
-         "    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};\n" <<
-         "  return __dtype[type];\n" <<
-         "}\n\n";
-     return CodeGenC::Finish();
+    decl_stream << "#include \"ppl_helper.h\"\n";
+    decl_stream << "static data_type_t __ppl_get_dtype(int type) {\n" <<
+        "  data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,\n" <<
+        "    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,\n" <<
+        "    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,\n" <<
+        "    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};\n" <<
+        "  return __dtype[type];\n" <<
+        "}\n\n";
+      // __ppl_tensor_info 结构体定义
+    decl_stream << "typedef struct {\n";
+    decl_stream << "  dim4 shape;\n";
+    decl_stream << "  dim4 stride;\n";
+    decl_stream << "  global_addr_t addr;\n";
+    decl_stream << "  data_type_t dtype;\n";
+    decl_stream << "  int mode;\n";
+    decl_stream << "  int align_mode;\n";
+    decl_stream << "  int size;\n";
+    decl_stream << "  int offset;\n";
+    decl_stream << "  bool unsigned_flag;\n";
+    decl_stream << "  bool default_stride;\n";
+    decl_stream << "} __ppl_tensor_info;\n\n";
+    return CodeGenC::Finish();
  }
  
  /* no need to change */
@@ -705,6 +718,8 @@
       dtype = "DT_FP16";
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
+    } else if (dtype_ == DataType::BFloat(16)) {  // 添加这行
+      dtype = "DT_BFP16";
     }
     if (!has_dtype) {
       dtype = "";
@@ -725,6 +740,8 @@
       dtype = "DT_FP16";
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
+    } else if (dtype_ == DataType::BFloat(16)) {  // 添加这行
+      dtype = "DT_BFP16";
     }
     this->PrintIndent();
     this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {." << dtype << " = " << value << "};\n";
@@ -781,8 +798,10 @@
         } else if (src_buffer->dtype == DataType::Int(16)){
           dtype = "DT_INT16";
           bytes_size = 2;
-        }
-        else {
+        } else if (src_buffer->dtype == DataType::BFloat(16)){  // 添加这行
+          dtype = "DT_BFP16";
+          bytes_size = 2;
+        } else {
           LOG(FATAL) << "Unsupported dtype " << src_buffer->dtype;
         }
         if (src_buffer.scope() == "global"){
@@ -801,7 +820,7 @@
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape + ", .stride = " + src_strides +", .addr = " + src_id + ".addr + " + min_expr +", .dtype = " + dtype + ", .mode = 2, .size = 1, .offset = " + min_expr + ", .unsigned_flag = 0, .default_stride = false};\n");
         } else if (src_buffer.scope() == "shared.dyn") {
 
-          inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape + ", .stride = NULL, .addr = " + var_idmap_[src_buffer->data.get()] + ".addr, .dtype = " + dtype + ", .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};\n");
+          inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape + ", .stride = {0}, .addr = " + var_idmap_[src_buffer->data.get()] + ".addr, .dtype = " + dtype + ", .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};\n");
         }
         return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
       };
@@ -840,6 +859,9 @@
       } else if (dtype == DataType::Float(32)) {
         dtype_1 = "f32";
         dtype_2 = "DT_FP32";
+      } else if (dtype == DataType::BFloat(16)) {  // 添加这个分支
+        dtype_1 = "bf16";
+        dtype_2 = "DT_BFP16";
       }
       auto addr = buffer_addrs_[var_];
       int value = Downcast<FloatImm>(op->args[2])->value;
@@ -888,6 +910,8 @@
         dtype = "DT_FP16";
       } else if (dtype_ == DataType::Float(32)) {
         dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)) {  // 添加这行
+        dtype = "DT_BFP16";
       }
       
       this->PrintIndent(); 
@@ -1192,7 +1216,11 @@
         dtype = "DT_FP32";
         dtype_2 = "f32";
         dtype_size = "4";
-      } else if (dtype_ == DataType::Int(32)){
+      } else if (dtype_ == DataType::BFloat(16)){
+        dtype = "DT_BFP16";
+        dtype_2 = "bf16";
+        dtype_size = "2";
+      }else if (dtype_ == DataType::Int(32)){
         dtype = "DT_UINT32";
         dtype_2 = "u32";
         dtype_size = "4";
@@ -1221,6 +1249,10 @@
         dtype1 = "DT_UINT16";
         dtype1_2 = "u16";
         dtype1_size = "2";
+      } else if (dtype1_ == DataType::UInt(8)){
+        dtype1 = "DT_UINT8";
+        dtype1_2 = "u8";
+        dtype1_size = "1";
       } else {
         LOG(FATAL) << "Embedding only supports Float16 currently";
       }
@@ -1264,11 +1296,11 @@
       this->PrintIndent();
       if (input_data_from_local) {
           // L2L 和 L2S,无需分情况讨论
-          this->stream << "tpu_gdma_cpy_cw_trans_L2L(" << params_tmp_tensor << ".addr, " << params_tensor << ".addr, &params_shape, &params_stride, &ori_params_stride, " << dtype1 << ");\n";
+          this->stream << "tpu_gdma_cpy_cw_trans_L2L(" << params_tmp_tensor << ".addr, " << params_tensor << ".addr, &params_shape, &params_stride, &ori_params_stride, " << dtype << ");\n";
       } else {
         if (output_data_to_local){
           // S2L
-          this->stream << "tpu_gdma_cpy_cw_trans_S2L(" << params_tmp_tensor << ".addr, " << params_tensor << ".addr, &params_shape, &params_stride, &ori_params_stride, " << dtype1 << ");\n";
+          this->stream << "tpu_gdma_cpy_cw_trans_S2L(" << params_tmp_tensor << ".addr, " << params_tensor << ".addr, &params_shape, &params_stride, &ori_params_stride, " << dtype << ");\n";
         }
       }
       
@@ -1483,6 +1515,37 @@ void CodeGenTileLangPPL::VisitStmt_(const AttrStmtNode* op) {
      op_dtype = "DT_FP32";
      bytes_size = 4;
    }
+   else if (op->dtype == DataType::BFloat(16)) {
+     op_dtype = "DT_BFP16";
+     bytes_size = 2;
+   }
+   else if (op->dtype == DataType::UInt(32)) {
+     op_dtype = "DT_UINT32";
+     bytes_size = 4;
+   }
+   else if (op->dtype == DataType::Int(32)) {
+     op_dtype = "DT_INT32";
+     bytes_size = 4;
+   }
+   else if (op->dtype == DataType::UInt(16)) {
+     op_dtype = "DT_UINT16";
+     bytes_size = 2;
+   }
+   else if (op->dtype == DataType::Int(16)) {
+     op_dtype = "DT_INT16";
+     bytes_size = 2;
+   }
+   else if (op->dtype == DataType::UInt(8)) {
+     op_dtype = "DT_UINT8";
+     bytes_size = 1;
+   }
+   else if (op->dtype == DataType::Int(8)) {
+     op_dtype = "DT_INT8";
+     bytes_size = 1;
+   }
+   else {
+     LOG(FATAL) << "Unsupported dtype " << op->dtype;
+   }
    auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
    for (size_t iter{0}; iter < buffer_num; iter++){
      std::string vid = AllocVarID(op->buffer_var.get());
@@ -1490,7 +1553,7 @@ void CodeGenTileLangPPL::VisitStmt_(const AttrStmtNode* op) {
      int tensor_size = shapes[0] * shapes[1] / lane_num * bytes_size;
      auto addr = f_attrs.GetAttr(vid, PrimExpr(0)).as<IntImmNode>()->value;
       buffer_addrs_[op->buffer_var.get()] = addr;
-     stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape << ", .stride = NULL" <<", .addr = " <<  addr << ", .dtype = "<< op_dtype << ", .mode = 2" << ", .align_mode = 1" << ", .size = " << tensor_size << ", .unsigned_flag = 0, .default_stride = true};\n";
+     stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape << ", .stride = {0}" <<", .addr = " <<  addr << ", .dtype = "<< op_dtype << ", .mode = 2" << ", .align_mode = 1" << ", .size = " << tensor_size << ", .unsigned_flag = 0, .default_stride = true};\n";
       this->buffer_shape[vid] = shapes;
       // store local tensor shape
     }
@@ -1673,9 +1736,32 @@ return;
      } else if (buffer_node->dtype == DataType::Float(32)){
        dtype = "DT_FP32";
        bytes_size = 4;
+     } else if (buffer_node->dtype == DataType::BFloat(16)){
+       dtype = "DT_BFP16";
+       bytes_size = 2;
+     } else if (buffer_node->dtype == DataType::UInt(32)){
+       dtype = "DT_UINT32";
+       bytes_size = 4;
+     } else if (buffer_node->dtype == DataType::Int(32)){
+       dtype = "DT_INT32";
+       bytes_size = 4;
+     } else if (buffer_node->dtype == DataType::UInt(16)){
+       dtype = "DT_UINT16";
+       bytes_size = 2;
+     } else if (buffer_node->dtype == DataType::Int(16)){
+       dtype = "DT_INT16";
+       bytes_size = 2;
+     } else if (buffer_node->dtype == DataType::UInt(8)){
+       dtype = "DT_UINT8";
+       bytes_size = 1;
+     } else if (buffer_node->dtype == DataType::Int(8)){
+       dtype = "DT_INT8";
+       bytes_size = 1;
+     } else {
+       LOG(FATAL) << "Unsupported dtype " << buffer_node->dtype;
      }
      tensor_size *= bytes_size;
-     std::string inst = "__ppl_tensor_info " + rid + " = {.shape = " + shape_s + ", .stride = NULL, .addr = " + vid + ", .dtype = " + dtype + ", .mode = 2, .align_mode = 0, .size = " + std::to_string(tensor_size) + ", .unsigned_flag = 0, .default_stride = true};\n";
+     std::string inst = "__ppl_tensor_info " + rid + " = {.shape = " + shape_s + ", .stride = {0}, .addr = " + vid + ", .dtype = " + dtype + ", .mode = 2, .align_mode = 0, .size = " + std::to_string(tensor_size) + ", .unsigned_flag = 0, .default_stride = true};\n";
      var_global_mem_map[v_node] = inst;
      std::string name_hint = v_node->name_hint;
      this->var_idmap_[v_node] = rid;

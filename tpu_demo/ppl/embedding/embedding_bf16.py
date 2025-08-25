@@ -2,7 +2,7 @@ import tilelang
 import tilelang.language as T
 import os
 
-def embedding_test(select_num, inner_num, index_num, dtype_0="float16", dtype_1 = 'uint16'):
+def embedding_test(select_num, inner_num, index_num, dtype_0="bfloat16", dtype_1 = 'uint16'):
     @T.prim_func
     def main(
             output: T.Tensor((index_num, inner_num), dtype_0),
@@ -25,7 +25,7 @@ def embedding_test(select_num, inner_num, index_num, dtype_0="float16", dtype_1 
 
 # 使用示例配置测试函数 - embedding测试
 # 参数: index_num=32(要查询的索引数量), inner_num=128(向量维度), select_num=1024(词表大小)
-func = embedding_test(65, 17, 7, "float16")
+func = embedding_test(65, 17, 7, "bfloat16")  # 修改这里
 mod = tilelang.lower(func, target='c')
 script_dir = os.path.dirname(os.path.abspath(__file__))
 embedding_ir = os.path.join(script_dir, "embedding_ir.py")
