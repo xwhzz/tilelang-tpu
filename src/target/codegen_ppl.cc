@@ -708,6 +708,19 @@ inline std::string vector2string(const std::vector<int> &vec) {
   return ret;
 }
 
+static inline const char* AsBDTypeStr(const DataType& dtype_) {
+  if (dtype_ == DataType::Float(32)) {
+    return "DT_FP32";
+  } else if (dtype_ == DataType::Float(16)) {
+    return "DT_FP16";
+  } else if (dtype_ == DataType::BFloat(16)) {
+    return "DT_BFP16";
+  }
+
+  // 其它类型回退为FP32
+  return "DT_FP32";
+}
+
 void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto process_stride = [&,
                          this](const std::vector<int> &src0_shape,
@@ -829,6 +842,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         if (src_buffer->dtype == DataType::Float(16)) {
           dtype = "DT_FP16";
           bytes_size = 2;
+        } else if (src_buffer->dtype == DataType::BFloat(16)) {
+          dtype = "DT_BFP16";
+          bytes_size = 2;
         } else if (src_buffer->dtype == DataType::Float(32)) {
           dtype = "DT_FP32";
           bytes_size = 4;
@@ -841,6 +857,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           auto strides = buffer_stride[src_buffer->name];
           src_strides = vector2string(strides);
           std::string min_expr;
+          std::vector<int> stride_map = {1, 3};
           for (int i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
             const PrimExpr &e = sr->min;
@@ -931,6 +948,11 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else if (dtype == DataType::Float(32)) {
         dtype_1 = "f32";
         dtype_2 = "DT_FP32";
+      } else if (dtype == DataType::BFloat(16)) {
+        dtype_1 = "bf16";
+        dtype_2 = "DT_BFP16";
+      } else {
+        LOG(FATAL) << "Unsupported dtype in ppl.fill: " << dtype;
       }
       auto addr = buffer_addrs_[var_];
       int value = Downcast<FloatImm>(op->args[2])->value;
@@ -954,17 +976,30 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto N = Downcast<IntImm>(op->args[7])->value;
       auto K = Downcast<IntImm>(op->args[8])->value;
       auto trans_B = Downcast<Bool>(op->args[5])->value;
+
+      auto a_dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      auto b_dtype = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      auto c_dtype = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      const char* left_right_dtype = AsBDTypeStr(a_dtype);
+      // 非转置路径：累加需要数据类型为FP32
+      const char* output_dtype_accum = "DT_FP32"; 
+      // 转置路径：若C与A/B同精度则可用同精度，否则用FP32
+      const char* output_dtype_trans =
+          (std::string(AsBDTypeStr(c_dtype)) == left_right_dtype) ? left_right_dtype : "DT_FP32";
+
       std::string M_K_N = std::to_string(M) + ", " + std::to_string(K) + ", " +
                           std::to_string(N);
       this->PrintIndent();
       if (!trans_B)
         this->stream << "tpu_bdc_fp_mm(" << c_access_data << ".addr, "
-                     << a_access_data << ".addr, " << b_access_data << ".addr,"
-                     << M_K_N << ", DT_FP32, DT_FP16, true);\n";
+                     << a_access_data << ".addr, " << b_access_data << ".addr, "
+                     << M_K_N << ", " << output_dtype_accum << ", "  
+                     << left_right_dtype << ", true);\n";
       else
         this->stream << "tpu_bdc_fp_mm_R_trans(" << c_access_data << ".addr, "
-                     << a_access_data << ".addr, " << b_access_data << ".addr,"
-                     << M_K_N << ", DT_FP32, DT_FP16);\n";
+                     << a_access_data << ".addr, " << b_access_data << ".addr, "
+                     << M_K_N << ", " << output_dtype_trans << ", "
+                     << left_right_dtype << ");\n";
     } else if (op_name == "ppl.sub") {
       handle_elementwise("tpu_bdc_fp_sub", true);
     } else if (op_name == "ppl.mul") {
