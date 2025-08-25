@@ -1094,6 +1094,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         dtype = "DT_FP16";
       } else if (dtype_ == DataType::Float(32)) {
         dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)) {  // 添加这行
+        dtype = "DT_BFP16";
       }
 
       this->PrintIndent();
@@ -1429,6 +1431,205 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->EndScope(sid);
       this->PrintIndent();
       this->stream << "}\n";
+    } else if (op_name == "ppl.embedding") {
+      // T.call_extern("handle", "ppl.embedding", outptr, paramptr, indexptr, outer_num, inner_num, select_num, index_num, const_val, param_tmp_ptr)
+      auto output_tensor = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto params_tensor = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto index_tensor = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto params_tmp_tensor = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
+      auto output_tmp_tensor = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
+      auto outer_num = Downcast<IntImm>(op->args[6])->value;
+      auto inner_num = Downcast<IntImm>(op->args[7])->value;
+      auto select_num = Downcast<IntImm>(op->args[8])->value;
+      auto index_num = Downcast<IntImm>(op->args[9])->value;
+      auto const_val = Downcast<FloatImm>(op->args[10])->value;
+
+      bool input_data_from_local = true;
+      bool output_data_to_local = true;
+      
+      // 获取数据类型
+      std::string dtype, dtype_2, dtype_size;
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      if (dtype_ == DataType::Float(16)){
+        dtype = "DT_FP16";
+        dtype_2 = "f16";
+        dtype_size = "2";
+      } else if (dtype_ == DataType::Float(32)){
+        dtype = "DT_FP32";
+        dtype_2 = "f32";
+        dtype_size = "4";
+      } else if (dtype_ == DataType::BFloat(16)){
+        dtype = "DT_BFP16";
+        dtype_2 = "bf16";
+        dtype_size = "2";
+      }else if (dtype_ == DataType::Int(32)){
+        dtype = "DT_UINT32";
+        dtype_2 = "u32";
+        dtype_size = "4";
+      } else if (dtype_ == DataType::UInt(32)){
+        dtype = "DT_UINT16";
+        dtype_2 = "u16";
+        dtype_size = "2";
+      } else {
+        LOG(FATAL) << "Embedding only supports Float16 currently";
+      }
+      std::string dtype1, dtype1_2 ,dtype1_size;
+      auto dtype1_ = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      if (dtype1_ == DataType::Float(16)){
+        dtype1 = "DT_FP16";
+        dtype1_2 = "f16";
+        dtype1_size = "2";
+      } else if (dtype1_ == DataType::Float(32)){
+        dtype1 = "DT_FP32";
+        dtype1_2 = "f32";
+        dtype1_size = "4";
+      } else if (dtype1_ == DataType::UInt(32)){
+        dtype1 = "DT_UINT32";
+        dtype1_2 = "u32";
+        dtype1_size = "4";
+      } else if (dtype1_ == DataType::UInt(16)){
+        dtype1 = "DT_UINT16";
+        dtype1_2 = "u16";
+        dtype1_size = "2";
+      } else if (dtype1_ == DataType::UInt(8)){
+        dtype1 = "DT_UINT8";
+        dtype1_2 = "u8";
+        dtype1_size = "1";
+      } else {
+        LOG(FATAL) << "Embedding only supports Float16 currently";
+      }
+      this->PrintIndent(); 
+      int sid = this->BeginScope();  
+      this->stream << "{\n";  
+
+      // 计算核心索引和获取核心数量
+      this->PrintIndent();
+      this->stream << "int core_idx = tpu_core_index();\n";
+      this->PrintIndent();
+      this->stream << "int core_num = tpu_core_num();\n";
+
+      // 定义读取形状
+      this->PrintIndent();
+      this->stream << "dim4 ori_output_shape = {1, " << index_num << ", 1, " << inner_num << "};\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_params_shape = {1, " << select_num << ", 1, " << inner_num << "};\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_index_shape = {1, " << index_num << ", 1, 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_output_stride = {" << index_num * inner_num << ", " << inner_num << "," << inner_num <<", 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_params_stride = {" << select_num * inner_num << ", " << inner_num << "," << inner_num <<", 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_index_stride = {" << index_num << ", 1, 1, 1};\n";
+
+      // 定义计算时形状
+      this->PrintIndent();
+      this->stream << "dim4 output_shape = {1, " << inner_num << ", 1, " << index_num << "};\n";
+      this->PrintIndent();
+      this->stream << "dim4 params_shape = {1, " << inner_num << ", 1, " << select_num << "};\n";
+      this->PrintIndent();
+      this->stream << "dim4 index_shape = {1, " << index_num << ", 1, 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 output_stride = {" << index_num * inner_num << ", " << index_num << "," << index_num <<", 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 params_stride = {" << select_num * inner_num << ", " << select_num << "," << select_num <<", 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 index_stride = {" << index_num << ", 1, 1, 1};\n";
+      this->PrintIndent();
+      if (input_data_from_local) {
+          // L2L 和 L2S,无需分情况讨论
+          this->stream << "tpu_gdma_cpy_cw_trans_L2L(" << params_tmp_tensor << ".addr, " << params_tensor << ".addr, &params_shape, &params_stride, &ori_params_stride, " << dtype << ");\n";
+      } else {
+        if (output_data_to_local){
+          // S2L
+          this->stream << "tpu_gdma_cpy_cw_trans_S2L(" << params_tmp_tensor << ".addr, " << params_tensor << ".addr, &params_shape, &params_stride, &ori_params_stride, " << dtype << ");\n";
+        }
+      }
+      
+
+      if (select_num < inner_num){
+        this->PrintIndent();
+        this->stream << "int index_slice = (" << index_num << " + core_num - 1) / core_num;\n";
+        this->PrintIndent();
+        this->stream << "int allocated_core = (" << index_num << " + index_slice - 1) / index_slice;\n";
+        this->PrintIndent();
+        this->stream << "int real_index_slice = MIN(index_slice, " << index_num << " - core_idx * index_slice);\n";
+        this->PrintIndent();
+        this->stream << "if (core_idx < allocated_core) {\n";
+        int sid = this->BeginScope();
+        this->PrintIndent();
+        this->stream << "dim4 index_subview_shape = {1, real_index_slice, 1, 1};\n";
+        this->PrintIndent();
+        this->stream << "dim4 index_subview_stride = {real_index_slice, 1, 1, 1};\n";
+        this->PrintIndent();
+        this->stream << "dim4 output_subview_shape = {1, " << inner_num << ", 1, real_index_slice};\n";
+        this->PrintIndent();
+        this->stream << "dim4 output_subview_stride = {" << inner_num << "* real_index_slice" << ", real_index_slice, real_index_slice, 1};\n";
+        this->PrintIndent();
+        this->stream << "__ppl_tensor_info index_subview_shared = {.shape = index_subview_shape, .stride = index_subview_stride, "
+                    << ".addr = " << index_tensor << ".addr + core_idx * index_slice * " << dtype1_size << ", .dtype = " << dtype1 << ", "
+                    << ".mode = 2, .align_mode = 0, .size = real_index_slice, .unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "__ppl_tensor_info output_subview_shared = {.shape = output_subview_shape, .stride = output_subview_stride, "
+                    << ".addr = " << output_tmp_tensor << ".addr + core_idx * " << inner_num << " * real_index_slice * " << dtype_size << ", .dtype = " << dtype << ", "
+                    << ".mode = 2, .align_mode = 0, .size = real_index_slice * " << inner_num << ", .unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "tpu_bdc_w_gather(output_subview_shared.addr, "<< params_tmp_tensor <<".addr, index_subview_shared.addr, &output_shape, params_shape.w, " << dtype << ", " << dtype1 << ");\n";
+        this->EndScope(sid);
+        this->PrintIndent();
+        this->stream << "};\n";
+      } else{
+        // split params
+        this->PrintIndent();
+        this->stream << "int inner_slice = (" << inner_num << " + core_num - 1) / core_num;\n";
+        this->PrintIndent();
+        this->stream << "int real_inner_slice = MIN(inner_slice, " << inner_num << " - core_idx * inner_slice);\n";
+        this->PrintIndent();
+        this->stream << "if (inner_slice > 0) {\n";
+        int sid = this->BeginScope();
+        this->PrintIndent();
+        this->stream << "dim4 params_subview_shape = {1, real_inner_slice, 1, " << select_num << "};\n";
+        this->PrintIndent();
+        this->stream << "dim4 params_subview_stride = {real_inner_slice * " << select_num << ", " << select_num << ", " << select_num << ", 1};\n";
+        this->PrintIndent();
+        this->stream << "dim4 output_subview_shape = {1, real_inner_slice, 1, " << index_num << "};\n";
+        this->PrintIndent();
+        this->stream << "dim4 output_subview_stride = {" << index_num << "* real_inner_slice" << ", " << index_num << ", " << index_num << ", 1};\n";
+        this->PrintIndent();
+        this->stream << "__ppl_tensor_info params_subview_shared = {.shape = params_subview_shape, .stride = params_subview_stride, "
+                    << ".addr = " << params_tensor << ".addr + core_idx * inner_slice * " << dtype_size << ", .dtype = " << dtype << ", "
+                    << ".mode = 2, .align_mode = 0, .size = real_inner_slice * " << select_num << ", .unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "__ppl_tensor_info output_subview_shared = {.shape = output_subview_shape, .stride = output_subview_stride, "
+                    << ".addr = " << output_tmp_tensor << ".addr + core_idx * inner_slice * " << dtype_size << ", .dtype = " << dtype << ", "
+                    << ".mode = 2, .align_mode = 0, .size = real_inner_slice * " << index_num << ", .unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        // tpu_bdc_w_gather(output_tmp_buffer.addr, params_tmp_buffer.addr, index_subview_shared.addr, &output_tmp_buffer.shape, params_tmp_buffer.shape.w, DT_FP16, DT_UINT16);
+        this->stream << "tpu_bdc_w_gather(output_subview_shared.addr, "<< params_tmp_tensor <<".addr, "<< index_tensor <<".addr, &output_subview_shared.shape, params_shape.w, " << dtype << ", " << dtype1 << ");\n";
+        this->EndScope(sid);
+        this->PrintIndent();
+        this->stream << "};\n";
+      }
+      
+      this->PrintIndent();
+      if (output_data_to_local) {
+          // L2L 和 S2L,无需分情况讨论
+          this->stream << "tpu_gdma_cpy_cw_trans_L2L(" << output_tensor << ".addr, " << output_tmp_tensor << ".addr, &ori_output_shape, &ori_output_stride, &output_stride, " << dtype << ");\n";
+      }
+      else {
+        // L2S 或S2S
+        if (input_data_from_local){
+          // L2S
+          this->stream << "tpu_gdma_cpy_cw_trans_L2S(" << output_tensor << ".addr, " << output_tmp_tensor << ".addr, &ori_output_shape, &ori_output_stride, &output_stride, " << dtype << ");\n";
+        } else{
+          // S2S todo
+        }
+      }
+
+      // 结束块作用域
+      this->EndScope(sid);
+      this->PrintIndent();  
+      this->stream << "}  //section embedding\n";  
     } else if (op_name == "ppl.rsqrt") {
       auto dst_dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
       auto src_dtype = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
