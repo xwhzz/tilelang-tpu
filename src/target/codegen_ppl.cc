@@ -1221,13 +1221,25 @@
         dtype_2 = "bf16";
         dtype_size = "2";
       }else if (dtype_ == DataType::Int(32)){
+        dtype = "DT_INT32";
+        dtype_2 = "s32";
+        dtype_size = "4";
+      } else if (dtype_ == DataType::UInt(32)){
         dtype = "DT_UINT32";
         dtype_2 = "u32";
         dtype_size = "4";
-      } else if (dtype_ == DataType::UInt(32)){
+      } else if (dtype_ == DataType::Int(16)){
+        dtype = "DT_INT16";
+        dtype_2 = "s16";
+        dtype_size = "2";
+      } else if (dtype_ == DataType::UInt(16)){
         dtype = "DT_UINT16";
         dtype_2 = "u16";
         dtype_size = "2";
+      } else if (dtype_ == DataType::UInt(8)){
+        dtype = "DT_UINT8";
+        dtype_2 = "u8";
+        dtype_size = "1";
       } else {
         LOG(FATAL) << "Embedding only supports Float16 currently";
       }
@@ -1245,10 +1257,18 @@
         dtype1 = "DT_UINT32";
         dtype1_2 = "u32";
         dtype1_size = "4";
+      } else if (dtype1_ == DataType::Int(16)){
+        dtype1 = "DT_INT16";
+        dtype1_2 = "s16";
+        dtype1_size = "2";
       } else if (dtype1_ == DataType::UInt(16)){
         dtype1 = "DT_UINT16";
         dtype1_2 = "u16";
         dtype1_size = "2";
+      } else if (dtype1_ == DataType::Int(8)){
+        dtype1 = "DT_INT8";
+        dtype1_2 = "s8";
+        dtype1_size = "1";
       } else if (dtype1_ == DataType::UInt(8)){
         dtype1 = "DT_UINT8";
         dtype1_2 = "u8";
@@ -1706,14 +1726,19 @@ return;
     std::string shape_s = "{";
     int tensor_size = 1;
     if (shape.size() == 2) {
-     buffer_shape[buffer_node->name] = {1, shape[0].as<IntImmNode>()->value, 1, shape[1].as<IntImmNode>()->value};
-     default_stride(buffer_node->name);
-     shape_s += "1 ,";
-     shape_s += std::to_string(shape[0].as<IntImmNode>()->value);
-     tensor_size *= shape[0].as<IntImmNode>()->value;
-     shape_s += ", 1, ";
-     shape_s += std::to_string(shape[1].as<IntImmNode>()->value);
-     tensor_size *= shape[1].as<IntImmNode>()->value;
+      buffer_shape[buffer_node->name] = {
+        1,
+        static_cast<int>(shape[0].as<IntImmNode>()->value),
+        1,
+        static_cast<int>(shape[1].as<IntImmNode>()->value)
+      };
+      default_stride(buffer_node->name);
+      shape_s += "1 ,";
+      shape_s += std::to_string(static_cast<int>(shape[0].as<IntImmNode>()->value));
+      tensor_size *= static_cast<int>(shape[0].as<IntImmNode>()->value);
+      shape_s += ", 1, ";
+      shape_s += std::to_string(shape[1].as<IntImmNode>()->value);
+      tensor_size *= shape[1].as<IntImmNode>()->value;
     } else if (shape.size() == 4) {
       buffer_shape[buffer_node->name] = {};
       for (auto s: shape) {
