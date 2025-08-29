@@ -762,6 +762,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
     }
+    else if (dtype_ == DataType::BFloat(16)){
+      dtype = "DT_BFP16";
+    }
     if (!has_dtype) {
       dtype = "";
     }
@@ -793,15 +796,29 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
       scalar_type = "f32";
+    } else if (dtype_ == DataType::BFloat(16)){
+      dtype = "DT_BFP16";
+      scalar_type = "bf16";
     }
-    this->PrintIndent();
-    this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, "
-                 << "(scalar_t){." << scalar_type << " = " << value << "}, &"
-                 << dst << ".shape, "
-                 << "(" << dst << ".default_stride ? NULL : &" << dst
-                 << ".stride), "
-                 << "(" << dst << ".default_stride ? NULL : &" << dst
-                 << ".stride), " << dtype << ");\n";
+    if (dtype == "DT_FP32"){
+      this->PrintIndent();
+      this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, "
+                  << "(scalar_t){." << scalar_type << " = " << value << "}, &"
+                  << dst << ".shape, "
+                  << "(" << dst << ".default_stride ? NULL : &" << dst
+                  << ".stride), "
+                  << "(" << dst << ".default_stride ? NULL : &" << dst
+                  << ".stride), " << dtype << ");\n";
+    }
+    else{
+      this->PrintIndent();
+      this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {.f32 = " << "(float)" << value << "};\n";
+      this->PrintIndent();
+      // x_neg_scalar_DT_BFP16 = tpu_cast(x_neg_scalar_DT_BFP16, DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);
+      this->stream << dst << "_scalar_" << dtype << " = tpu_cast(" << dst << "_scalar_" << dtype << ", " << dtype << ", DT_FP32, RM_HALF_TO_EVEN);\n";
+      this->PrintIndent();
+      this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), " <<  dtype << ");\n";
+    }
   };
   std::vector<std::string> inst;
   if (op->op.same_as(builtin::call_extern())) {
@@ -1405,6 +1422,42 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ".addr, "
                    << "&" << src0 << ".shape"
                    << ");\n";
+    } else if (op_name == "ppl.rope_add") {
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto even_src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto even_src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto odd_src0 = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
+      auto odd_src1 = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      int bytes_size = 0;
+      if (dtype_ == DataType::Float(16)){
+        dtype = "DT_FP16";
+        bytes_size = 2;
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+        bytes_size = 4;
+      } else if (dtype_ == DataType::BFloat(16)){
+        dtype = "DT_BFP16";
+        bytes_size = 2;
+      }
+      this->PrintIndent();
+      this->stream << "dim4 half_stride;\n";
+      this->PrintIndent();
+      this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "half_stride.w *= 2;\n";
+      this->PrintIndent();
+      // this->stream << "dim4 half_shape = " << dst << ".shape" << ";\n";
+      this->stream << "dim4 half_shape = {.n = " << dst << ".shape.n, .c = " << dst << ".shape.c, .h = " << dst << ".shape.h, .w = " << dst << ".shape.w};\n";
+      this->PrintIndent();
+      this->stream << "half_shape.w /= 2;\n";
+      // tpu_bdc_fp_add( out.addr, x_cos.addr, x_neg_sin.addr + DtypeSize(DT_FP32), &half_shape, &half_stride, &half_stride, &half_stride, DT_FP32);
+      // tpu_bdc_fp_add( out.addr + DtypeSize(DT_FP32), x_cos.addr + DtypeSize(DT_FP32), x_sin.addr, &half_shape, &half_stride, &half_stride, &half_stride, DT_FP32);
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_add( " << dst << ".addr, " << even_src0 << ".addr, " << even_src1 << ".addr + " << bytes_size << ", " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_add( " << dst << ".addr + " << bytes_size << ", " << odd_src0 << ".addr + " << bytes_size << ", " << odd_src1 << ".addr, " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
     }
 
   } else if (op->op.same_as(builtin::if_then_else())) {
@@ -1532,6 +1585,9 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   } else if (op->dtype == DataType::Float(32)) {
     op_dtype = "DT_FP32";
     bytes_size = 4;
+  } else if (op->dtype == DataType::BFloat(16)){
+    op_dtype = "DT_BFP16";
+    bytes_size = 2;
   }
   auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
   for (size_t iter{0}; iter < buffer_num; iter++) {
@@ -1734,6 +1790,9 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     } else if (buffer_node->dtype == DataType::Float(32)) {
       dtype = "DT_FP32";
       bytes_size = 4;
+    } else if (buffer_node->dtype == DataType::BFloat(16)){
+      dtype = "DT_BFP16";
+      bytes_size = 2;
     }
     tensor_size *= bytes_size;
     std::string inst =

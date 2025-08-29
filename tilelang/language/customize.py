@@ -270,3 +270,11 @@ def ppl_reduce_max(inp, out, dim, clear=True):
     assert dim == 1, "Only dim=1 is supported"
     # 调用不含断言的宏函数
     return ppl_reduce_max_safe(inp, out, dim, clear)
+
+def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
+    outptr = out.access_ptr("w")
+    even_inpptr1 = even_inp1.access_ptr("r")
+    even_inpptr2 = even_inp2.access_ptr("r")
+    odd_inpptr1 = odd_inp1.access_ptr("r")
+    odd_inpptr2 = odd_inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.rope_add", outptr, even_inpptr1, even_inpptr2, odd_inpptr1, odd_inpptr2)
