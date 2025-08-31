@@ -1411,16 +1411,105 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "}\n";
     } else if (op_name == "ppl.rsqrt") {
-      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0_shape = buffer_shape[src0];
-      // void tpu_bdc_fp32_rsqrt(local_addr_t dst_addr, local_addr_t src_addr,
-      // const dim4 *shape)
-      this->PrintIndent();
-      this->stream << "tpu_bdc_fp32_rsqrt(" << dst << ".addr, " << src0
-                   << ".addr, "
-                   << "&" << src0 << ".shape"
-                   << ");\n";
+      auto dst_var = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+      auto src_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+      auto dst = var_idmap_[dst_var];
+      auto src0 = var_idmap_[src_var];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dst_dtype_str;
+      if (dtype_ == DataType::Float(32)) {
+        dst_dtype_str = "DT_FP32";
+      } else if (dtype_ == DataType::Float(16)) {
+        dst_dtype_str = "DT_FP16";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        dst_dtype_str = "DT_BFP16";
+      } else {
+        LOG(FATAL) << "ppl.rsqrt: unsupported dst dtype";
+      }
+      auto src_dtype_ = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string src_dtype_str;
+      if (src_dtype_ == DataType::Float(32)) {
+        src_dtype_str = "DT_FP32";
+      } else if (src_dtype_ == DataType::Float(16)) {
+        src_dtype_str = "DT_FP16";
+      } else if (src_dtype_ == DataType::BFloat(16)) {
+        src_dtype_str = "DT_BFP16";
+      } else {
+        LOG(FATAL) << "ppl.rsqrt: unsupported src dtype";
+      }
+
+      auto dst_stride_ptr_expr = dst + std::string(".default_stride ? NULL : &") + dst + ".stride";
+      auto src_stride_ptr_expr = src0 + std::string(".default_stride ? NULL : &") + src0 + ".stride";
+      if (src_dtype_str == "DT_FP32" && dst_dtype_str == "DT_FP32") {
+        // void tpu_bdc_fp32_rsqrt(local_addr_t dst_addr, local_addr_t src_addr,
+        // const dim4 *shape)
+        this->PrintIndent();
+        this->stream << "tpu_bdc_fp32_rsqrt("
+                    << dst  << ".addr, "
+                    << src0 << ".addr, "
+                    << "&"  << src0 << ".shape"
+                    << ");\n";
+        return;
+      } else {
+        std::string tmp_in  = name_supply_->FreshName("tmp_in_fp32");
+        std::string tmp_out = name_supply_->FreshName("tmp_out_fp32");
+
+        // dim4 对象：直接复用 src/dst 的 shape（对齐 rope_add 的写法，显式展开字段更稳）
+        this->PrintIndent();
+        this->stream << "dim4 " << tmp_in  << "_shape = {."
+                    << "n = " << src0 << ".shape.n, "
+                    << ".c = " << src0 << ".shape.c, "
+                    << ".h = " << src0 << ".shape.h, "
+                    << ".w = " << src0 << ".shape.w};\n";
+        this->PrintIndent();
+        this->stream << "dim4 " << tmp_out << "_shape = {."
+                    << "n = " << dst  << ".shape.n, "
+                    << ".c = " << dst  << ".shape.c, "
+                    << ".h = " << dst  << ".shape.h, "
+                    << ".w = " << dst  << ".shape.w};\n";
+
+        // 对齐“默认步幅→NULL”的调用习惯，这里让硬件自己对齐 fp32 的 stride
+        this->PrintIndent();
+        this->stream << "dim4 " << tmp_in  << "_stride; tpu_aligned_stride(&" << tmp_in  << "_stride, 0, &" << tmp_in  << "_shape, DT_FP32);\n";
+        this->PrintIndent();
+        this->stream << "dim4 " << tmp_out << "_stride; tpu_aligned_stride(&" << tmp_out << "_stride, 0, &" << tmp_out << "_shape, DT_FP32);\n";
+
+        // 你可以换成真实的 new_tensor_xxx.addr（如调度层已分好 scratch），或从 buffer_addrs_ 的临时 id 拿。
+        this->PrintIndent();
+        this->stream << "local_addr_t " << tmp_in  << "_addr  = tl_tmp_alloc(&" << tmp_in  << "_shape, DT_FP32);\n";
+        this->PrintIndent();
+        this->stream << "local_addr_t " << tmp_out << "_addr  = tl_tmp_alloc(&" << tmp_out << "_shape, DT_FP32);\n";
+
+        // 1) cast: src_dtype → FP32
+        this->PrintIndent();
+        this->stream << "tpu_bdc_cast("
+                    << tmp_in << "_addr, "
+                    << src0   << ".addr, "
+                    << "&"    << tmp_in << "_shape, "
+                    << "&"    << tmp_in << "_stride, "
+                    << "("    << src0   << ".default_stride ? NULL : &" << src0 << ".stride), "
+                    << "DT_FP32, " << src_dtype_str << ", 0);\n";
+
+        // 2) fp32 rsqrt（可调迭代）
+        this->PrintIndent();
+        this->stream << "tpu_bdc_fp32_rsqrt("
+                    << tmp_out << "_addr, "
+                    << tmp_in  << "_addr, "
+                    << "&"     << tmp_in  << "_shape"
+                    << ");\n";
+
+        // 3) cast: FP32 → dst_dtype
+        this->PrintIndent();
+        this->stream << "tpu_bdc_cast("
+                    << dst  << ".addr, "
+                    << tmp_out << "_addr, "
+                    << "&"  << dst  << ".shape, "
+                    << "(" << dst  << ".default_stride ? NULL : &" << dst  << ".stride), "
+                    << "&"  << tmp_out << "_stride, "
+                    << dst_dtype_str << ", DT_FP32, 0);\n";
+
+      }
+
     } else if (op_name == "ppl.rope_add") {
       auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
       auto even_src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
