@@ -9,13 +9,13 @@ static data_type_t __ppl_get_dtype(int type) {
 
 void main(global_addr_t v1, global_addr_t v2, global_addr_t v3) {
   __ppl_tensor_info v6 = {.shape = {1 ,384, 1, 768}, .stride = NULL, .addr = v3, .dtype = DT_FP32, .mode = 2, .align_mode = 0, .size = 1179648, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v5 = {.shape = {1 ,768, 1, 768}, .stride = NULL, .addr = v2, .dtype = , .mode = 2, .align_mode = 0, .size = 0, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v4 = {.shape = {1 ,384, 1, 768}, .stride = NULL, .addr = v1, .dtype = , .mode = 2, .align_mode = 0, .size = 0, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v5 = {.shape = {1 ,768, 1, 768}, .stride = NULL, .addr = v2, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 1179648, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v4 = {.shape = {1 ,384, 1, 768}, .stride = NULL, .addr = v1, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 589824, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info C_shared = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 0, .dtype = DT_FP32, .mode = 2, .align_mode = 1, .size = 1024, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info A_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 65536, .dtype = , .mode = 2, .align_mode = 1, .size = 0, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info B_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 49152, .dtype = , .mode = 2, .align_mode = 1, .size = 0, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info A_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 32768, .dtype = , .mode = 2, .align_mode = 1, .size = 0, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info B_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 16384, .dtype = , .mode = 2, .align_mode = 1, .size = 0, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info A_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 65536, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info B_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 49152, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info A_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 32768, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info B_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 16384, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
   for (int bx = 0; bx < 6; ++bx) {
     for (int by = 0; by < 3; ++by) {
       scalar_t C_shared_scalar_f32 = {.f32 = 0};
