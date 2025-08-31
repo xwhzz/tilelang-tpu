@@ -761,10 +761,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       dtype = "DT_FP16";
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
-    } else if (dtype_ == DataType::BFloat(16)) {
-      dtype = "DT_BFP16";
-    }
-    else if (dtype_ == DataType::BFloat(16)){
+    } else if (dtype_ == DataType::BFloat(16)){
       dtype = "DT_BFP16";
     }
     if (!has_dtype) {
@@ -798,6 +795,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
       scalar_type = "f32";
+    } else if (dtype_ == DataType::BFloat(16)){
+      dtype = "DT_BFP16";
+      scalar_type = "bf16";
     }
     if (dtype == "DT_FP32"){
       this->PrintIndent();
