@@ -761,6 +761,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       dtype = "DT_FP16";
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
+    } else if (dtype_ == DataType::BFloat(16)) {
+      dtype = "DT_BFP16";
     }
     else if (dtype_ == DataType::BFloat(16)){
       dtype = "DT_BFP16";
@@ -781,7 +783,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
   };
   // void tpu_bdc_fp_mul_C(local_addr_t dst_addr, local_addr_t src_addr,
   // scalar_t C, const dim4 *shape, const dim4 *dst_stride, const dim4
-  // *src_stride, data_type_t dtype)
+  // *src_stride, data_type_t dtype)
   auto handle_elementwise_const = [&, this](std::string op_name) {
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
@@ -796,9 +798,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else if (dtype_ == DataType::Float(32)) {
       dtype = "DT_FP32";
       scalar_type = "f32";
-    } else if (dtype_ == DataType::BFloat(16)){
-      dtype = "DT_BFP16";
-      scalar_type = "bf16";
     }
     if (dtype == "DT_FP32"){
       this->PrintIndent();
