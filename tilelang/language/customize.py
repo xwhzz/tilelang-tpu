@@ -196,9 +196,18 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
 
 
 def ppl_rsqrt(out, inp):
-    inpptr = inp.access_ptr("r")
-    outptr = out.access_ptr("w")
-    return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
+    if(inp.dtype == "float32" and out.dtype == "float32"):
+        inpptr = inp.access_ptr("r")
+        outptr = out.access_ptr("w")
+        return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
+    else:
+        inp_tmp = T.alloc_shared(inp.shape, "float32")
+        out_tmp = T.alloc_shared(out.shape, "float32")
+        T.copy(inp, inp_tmp)
+        inpptr = inp_tmp.access_ptr("r")
+        outptr = out_tmp.access_ptr("w")
+        T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
+        T.copy(out_tmp, out)
 
 
 def ppl_add_C(out, inp1, value):
