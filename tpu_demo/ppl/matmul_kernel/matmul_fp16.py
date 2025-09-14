@@ -5,7 +5,7 @@ import tilelang
 import tilelang.language as T
 
 
-def matmul(M, N, K, block_M, block_N, block_K, stage, dtype="bfloat16", accum_dtype="bfloat16"):
+def matmul(M, N, K, block_M, block_N, block_K, stage, dtype="float16", accum_dtype="float16"):
 
     @T.prim_func
     def main(
