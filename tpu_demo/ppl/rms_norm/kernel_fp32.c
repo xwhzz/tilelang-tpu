@@ -1,13 +1,30 @@
 #include "ppl_helper.h"
+
 static data_type_t __ppl_get_dtype(int type) {
   data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,
-    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
-    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
-    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
+      DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
+      DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
+      DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
   return __dtype[type];
 }
 
-void main(global_addr_t v1, global_addr_t v2) {
+typedef struct {
+  dim4 shape;
+  dim4 stride;
+  global_addr_t addr;
+  data_type_t dtype;
+  int mode;
+  int align_mode;
+  int size;
+  int offset;
+  bool unsigned_flag;
+  bool default_stride;
+} __ppl_tensor_info;
+typedef struct {
+  global_addr_t v1_v1;
+  global_addr_t v2_v2;
+} tpu_kernel_api_rms_norm_t;
+void rms_norm_inner(global_addr_t v1, global_addr_t v2) {
   __ppl_tensor_info v4 = {.shape = {1 ,2048, 1, 2048}, .stride = NULL, .addr = v2, .dtype = DT_FP32, .mode = 2, .align_mode = 0, .size = 16777216, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v3 = {.shape = {1 ,2048, 1, 2048}, .stride = NULL, .addr = v1, .dtype = DT_FP32, .mode = 2, .align_mode = 0, .size = 16777216, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info A_shared = {.shape = { 1, 64, 1, 2048}, .stride = NULL, .addr = 49152, .dtype = DT_FP32, .mode = 2, .align_mode = 1, .size = 8192, .unsigned_flag = 0, .default_stride = true};
@@ -60,15 +77,12 @@ void main(global_addr_t v1, global_addr_t v2) {
     tpu_gdma_cpy_L2S(B.addr, A_shared_2.addr, &B.shape, (B.default_stride ? NULL : &B.stride), (A_shared_2.default_stride ? NULL : &A_shared_2.stride), DT_FP32);
   }
 }
-
-typedef struct {
-  global_addr_t v1;
-  global_addr_t v2;
-} tpu_kernel_api_main_args_t;
-void main_kernel(const void * args) {
-  tpu_kernel_api_main_args_t *api = (tpu_kernel_api_main_args_t*)args;
-  main(api->v1,
-    api->v2);
+int rms_norm(const void * args) {
+  tpu_kernel_api_rms_norm_t *api = (tpu_kernel_api_rms_norm_t*)args;
+  tpu_initialize();
+  rms_norm_inner(api->v1_v1,
+    api->v2_v2);
   tpu_poll();
+  return 0;
 }
-TPUKERNEL_FUNC_REGISTER(main_kernel)
+TPUKERNEL_FUNC_REGISTER(rms_norm)
