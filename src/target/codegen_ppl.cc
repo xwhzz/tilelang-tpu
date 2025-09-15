@@ -977,6 +977,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto addr = buffer_addrs_[var_];
       int value = Downcast<FloatImm>(op->args[2])->value;
       this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
       this->stream << "scalar_t " << data_ << "_scalar_" << dtype_1 << " = {."
                    << dtype_1 << " = " << value << "};\n";
       this->PrintIndent();
@@ -984,6 +986,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << "_scalar_" << dtype_1 << ", &" << data_ << ".shape, ("
                    << data_ << ".default_stride ? NULL : &" << data_
                    << ".stride), " << dtype_2 << ");\n";
+      this->PrintIndent();
+      this->stream << "}\n";
     } else if (op_name == "ppl.gemm") {
       auto a_access_data =
           var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
