@@ -811,12 +811,16 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     else{
       this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
       this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {.f32 = " << "(float)" << value << "};\n";
       this->PrintIndent();
       // x_neg_scalar_DT_BFP16 = tpu_cast(x_neg_scalar_DT_BFP16, DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);
       this->stream << dst << "_scalar_" << dtype << " = tpu_cast(" << dst << "_scalar_" << dtype << ", " << dtype << ", DT_FP32, RM_HALF_TO_EVEN);\n";
       this->PrintIndent();
       this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), " <<  dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "}\n";
     }
   };
   std::vector<std::string> inst;
