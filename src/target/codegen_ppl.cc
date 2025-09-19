@@ -806,7 +806,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                   << dst << ".shape, "
                   << "(" << dst << ".default_stride ? NULL : &" << dst
                   << ".stride), "
-                  << "(" << dst << ".default_stride ? NULL : &" << dst
+                  << "(" << src0 << ".default_stride ? NULL : &" << src0
                   << ".stride), " << dtype << ");\n";
     }
     else{
