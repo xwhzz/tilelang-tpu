@@ -1098,7 +1098,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       // 创建pad_val
       this->PrintIndent();
       this->stream << "scalar_t pad_val = {."
-                   << (dtype_ == DataType::Float(16) ? "f16" : "f16")
+                   << (dtype_ == DataType::Float(16) ? "f16" : "f32")
                    << " = FP_NEG_MAX(" << dtype << ")};\n";
 
       // 判断是否需要填充 - 只有在宽度不是EU数的倍数时才需要填充
