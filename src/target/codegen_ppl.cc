@@ -877,7 +877,18 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           auto strides = buffer_stride[src_buffer->name];
           src_strides = vector2string(strides);
           std::string min_expr;
-          std::vector<int> stride_map = {1, 3};
+          // 根据region的维度，绑定stride的索引
+          std::vector<int> stride_idx;
+          if (src_ranges.size() == 4) { // N, C, H, W
+            stride_idx = {0, 1, 2, 3};
+          } else if (src_ranges.size() == 3) { // C, H, W
+            stride_idx = {1, 2, 3};
+          } else if (src_ranges.size() == 2) { // C, W
+            stride_idx = {1, 3};
+          } else {
+            LOG(FATAL) << "Unsupported region dims: " << src_ranges.size();
+          }
+
           for (int i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
             const PrimExpr &e = sr->min;
@@ -888,7 +899,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
               idx_str = PrintExpr(e);
             }
             min_expr +=
-                "(" + idx_str + ") * " + std::to_string(strides[stride_map[i]]) + "+";
+                "(" + idx_str + ") * " + std::to_string(strides[stride_idx[i]]) + "+";
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);

@@ -113,16 +113,21 @@ public:
       int64_t min_conflict_count = std::numeric_limits<int64_t>::max();
       for (int i = 0; i < bank_num_; ++i) {
         int64_t offset = i * bank_size_;
-        int64_t mem_cross_bank_num = std::ceil(
-            static_cast<float>(liveRange[op].tensor_size) / bank_size_);
-        int64_t end_offset = offset + (mem_cross_bank_num + 1) * bank_size_;
-        if (i + mem_cross_bank_num >= bank_num_) {
+        // int64_t mem_cross_bank_num = std::ceil(
+        //     static_cast<float>(liveRange[op].tensor_size) / bank_size_);
+        uint64_t bytes = liveRange[op].tensor_size;
+        int64_t mem_cross_bank_num =
+            static_cast<int64_t>((bytes + bank_size_ - 1) / bank_size_);
+        mem_cross_bank_num = std::max<int64_t>(mem_cross_bank_num, 1);
+
+        if (i + mem_cross_bank_num > bank_num_) {
           break;
         }
+        int64_t end_offset = offset + mem_cross_bank_num * bank_size_;
         auto op_addr = searchAddr(op, liveRange, offset, end_offset);
 
         // op can insert
-        if (op_addr->start + op_addr->size < std::min(end_offset, mem_size_)) {
+        if (op_addr->start + op_addr->size <= std::min(end_offset, mem_size_)) {
           int64_t conf_count = getConflictCount(op_addr, conflictMap);
           if (conf_count < min_conflict_count) {
             min_conflict_count = conf_count;
@@ -152,7 +157,7 @@ protected:
                      });
     allocated_op_list_.emplace(iter, opAddr);
     int64_t bank_start = opAddr->start / bank_size_;
-    int64_t bank_end = opAddr->end / bank_size_;
+    int64_t bank_end = (opAddr->end - 1) / bank_size_;
     for (int i = bank_start; i <= bank_end; i++) {
       bank_ops[i].push_back(opAddr->op);
     }
@@ -163,7 +168,7 @@ protected:
       std::unordered_map<const BufferNode *,
                          std::unordered_set<const BufferNode *>> &conflictMap) {
     int64_t bank_start = opAddr->start / bank_size_;
-    int64_t bank_end = opAddr->end / bank_size_;
+    int64_t bank_end = (opAddr->end - 1) / bank_size_;
     int count = 0;
     for (int i = bank_start; i <= bank_end; i++) {
       for (auto op : bank_ops[i]) {
@@ -182,9 +187,11 @@ protected:
 
     std::shared_ptr<OpAddr> op_addr = std::make_shared<OpAddr>(
         op, liveRange[op].tensor_size, liveRange[op].start, liveRange[op].end);
-    int64_t prev_offset = offset;
+    auto align64 = [](int64_t x){ return (x + 63) & ~63; };
+    int64_t prev_offset = align64(offset);
     int64_t best_offset = -1;
     int64_t smallest_gap = std::numeric_limits<int64_t>::max();
+
     for (auto &allocated_op_addr : allocated_op_list_) {
       if (allocated_op_addr->start > end_offset) {
         break;
@@ -197,13 +204,13 @@ protected:
         int64_t gap = allocated_op_addr->start - prev_offset;
         if (gap >= op_addr->size && gap < smallest_gap) {
           smallest_gap = gap;
-          best_offset = prev_offset;
+          best_offset = align64(prev_offset);
         }
         prev_offset = std::max(prev_offset, allocated_op_addr->end);
       }
     }
     if (best_offset == -1) {
-      best_offset = prev_offset;
+      best_offset = align64(prev_offset);
     }
     op_addr->start = best_offset;
     op_addr->end = op_addr->start + op_addr->size;
@@ -243,21 +250,53 @@ PrimFunc InferAddress(PrimFunc f) {
     }
     auto shape = op->shape;
     auto dtype = op->dtype;
-    uint32_t op_size = 1;
+
+    // uint32_t op_size = 1;
+    // for (auto s : shape) {
+    //   int ss = s.as<IntImmNode>()->value;
+    //   op_size *= ss;
+    // }
+    // op_size /= bank_num;
+    // int bytes_size = 1;
+    // if (dtype == DataType::Float(16)) {
+    //   bytes_size = 2;
+    // } else if (dtype == DataType::Float(32)) {
+    //   bytes_size = 4;
+    // }
+    // op_size *= bytes_size;
+    // // live_ranges.Set(op, {1, 4, op_size});
+    // live_ranges[op] = {1, 4, op_size};
+
+    auto align_up = [](uint64_t x, uint64_t a) {
+      return (x + a - 1) & ~(a - 1);
+    };
+    uint64_t elem_cnt = 1;
     for (auto s : shape) {
-      int ss = s.as<IntImmNode>()->value;
-      op_size *= ss;
+      ICHECK(s.as<IntImmNode>())
+          << "Only IntImm shapes are supported in AddressAssign";
+      elem_cnt *= static_cast<uint64_t>(s.as<IntImmNode>()->value);
     }
-    op_size /= bank_num;
-    int bytes_size = 1;
-    if (dtype == DataType::Float(16)) {
-      bytes_size = 2;
-    } else if (dtype == DataType::Float(32)) {
-      bytes_size = 4;
-    }
-    op_size *= bytes_size;
-    // live_ranges.Set(op, {1, 4, op_size});
-    live_ranges[op] = {1, 4, op_size};
+    // 元素字节
+    uint32_t elem_bytes = 1;
+    if (dtype == DataType::Float(16))      elem_bytes = 2;
+    else if (dtype == DataType::BFloat(16))elem_bytes = 2;
+    else if (dtype == DataType::Float(32)) elem_bytes = 4;
+    else if (dtype == DataType::Int(32))   elem_bytes = 4;
+    else if (dtype == DataType::UInt(32))  elem_bytes = 4;
+    else if (dtype == DataType::Int(16))   elem_bytes = 2;
+    else if (dtype == DataType::UInt(16))  elem_bytes = 2;
+    else if (dtype == DataType::Int(8) ||
+            dtype == DataType::UInt(8))   elem_bytes = 1;
+
+    uint64_t size_bytes = elem_cnt * elem_bytes;
+
+    // 至少占 64B，并且 64B 对齐
+    const uint64_t kAlign = 64;
+    size_bytes = std::max<uint64_t>(size_bytes, kAlign);
+    size_bytes = align_up(size_bytes, kAlign);
+
+    // live range 暂时保守写死（后面可改为真实生命周期分析）
+    live_ranges[op] = {1, 4, static_cast<uint32_t>(size_bytes)};
   }
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
@@ -275,6 +314,9 @@ PrimFunc InferAddress(PrimFunc f) {
       fn_attr->dict.Set(op->name, PrimExpr(address));
     }
   }
+  std::cerr << "[AddressAssign] success=" << std::boolalpha << success
+          << " total=" << memUsedWithBC << " bytes\n";
+
   return f;
 }
 
