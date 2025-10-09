@@ -29,5 +29,5 @@ def matmul(M, N, K, block_M, block_N, block_K, stage, dtype="float32", accum_dty
     return main
 
 
-func =  matmul(384, 768, 768, 128, 128, 128, 2)
+func =  matmul(384, 768, 768, 128, 128, 64, 2)
 mod = tilelang.lower(func)
