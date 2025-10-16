@@ -1,4 +1,4 @@
-/*
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -862,12 +862,30 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         if (src_buffer->dtype == DataType::Float(16)) {
           dtype = "DT_FP16";
           bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::BFloat(16)) {
-          dtype = "DT_BFP16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::Float(32)) {
+        } else if (src_buffer->dtype == DataType::Float(32)){
           dtype = "DT_FP32";
           bytes_size = 4;
+        } else if (src_buffer->dtype == DataType::BFloat(16)){ 
+          dtype = "DT_BFP16";
+          bytes_size = 2;
+        } else if (src_buffer->dtype == DataType::UInt(32)){
+          dtype = "DT_UINT32";
+          bytes_size = 4;
+        }else if (src_buffer->dtype == DataType::Int(32)){
+          dtype = "DT_INT32";
+          bytes_size = 4;
+        } else if (src_buffer->dtype == DataType::UInt(8)){
+          dtype = "DT_UINT8";
+          bytes_size = 1;
+        } else if (src_buffer->dtype == DataType::Int(8)){
+          dtype = "DT_INT8";
+          bytes_size = 1;
+        } else if (src_buffer->dtype == DataType::UInt(16)){
+          dtype = "DT_UINT16";
+          bytes_size = 2;
+        } else if (src_buffer->dtype == DataType::Int(16)){
+          dtype = "DT_INT16";
+          bytes_size = 2;
         } else {
           LOG(FATAL) << "Unsupported dtype " << src_buffer->dtype;
         }
@@ -1832,6 +1850,26 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   } else if (op->dtype == DataType::BFloat(16)){
     op_dtype = "DT_BFP16";
     bytes_size = 2;
+  } else if (op->dtype == DataType::UInt(32)) {
+    op_dtype = "DT_UINT32";
+    bytes_size = 4;
+  } else if (op->dtype == DataType::Int(32)) {
+    op_dtype = "DT_INT32";
+    bytes_size = 4;
+  } else if (op->dtype == DataType::UInt(16)) {
+    op_dtype = "DT_UINT16";
+    bytes_size = 2;
+  } else if (op->dtype == DataType::Int(16)) {
+    op_dtype = "DT_INT16";
+    bytes_size = 2;
+  } else if (op->dtype == DataType::UInt(8)) {
+    op_dtype = "DT_UINT8";
+    bytes_size = 1;
+  } else if (op->dtype == DataType::Int(8)) {
+    op_dtype = "DT_INT8";
+    bytes_size = 1;
+  } else {
+    LOG(FATAL) << "Unsupported dtype " << op->dtype;
   }
   auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
   for (size_t iter{0}; iter < buffer_num; iter++) {
