@@ -1,13 +1,33 @@
 #include "ppl_helper.h"
+
 static data_type_t __ppl_get_dtype(int type) {
   data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,
-    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
-    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
-    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
+      DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
+      DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
+      DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
   return __dtype[type];
 }
 
-void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4) {
+typedef struct {
+  dim4 shape;
+  dim4 stride;
+  global_addr_t addr;
+  data_type_t dtype;
+  int mode;
+  int align_mode;
+  int size;
+  int offset;
+  bool unsigned_flag;
+  bool default_stride;
+} __ppl_tensor_info;
+typedef struct {
+  global_addr_t v1;
+  global_addr_t v2;
+  global_addr_t v3;
+  global_addr_t v4;
+} tpu_kernel_api_flashattn_t;
+
+void flashattn_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4) {
   __ppl_tensor_info v8 = {.shape = {1, 4, 2, 8}, .stride = NULL, .addr = v4, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = 128, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v7 = {.shape = {1, 4, 2, 8}, .stride = NULL, .addr = v3, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = 128, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v6 = {.shape = {1, 4, 2, 8}, .stride = NULL, .addr = v2, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = 128, .unsigned_flag = 0, .default_stride = true};
@@ -97,7 +117,7 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
           tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, &kernel2, &pad, &stride, &dilation, DT_FP32, pad_val);
         }
         tpu_bdc_fp_sub( scores_scale.addr, scores_max_prev.addr, scores_max.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-        tpu_bdc_fp_mul_C( scores_scale.addr, scores_scale.addr, (scalar_t){.f32 = 0.51007}, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
+        tpu_bdc_fp_mul_C( scores_scale.addr, scores_scale.addr, (scalar_t){.f32 = 0.353553}, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
         tpu_bdc_load_fp32_exp_coeff(coeff.addr);
         tpu_bdc_load_fp32_exp_table(table.addr);
         tpu_bdc_fp32_exp(scores_scale.addr, scores_scale.addr, work0.addr, work1.addr, coeff.addr, table.addr, &scores_scale.shape);
@@ -105,7 +125,7 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
         tpu_aligned_stride(&scores_max_stride, 0, &scores_max.shape, DT_FP32);
         scores_max_stride.w = 0;
         tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_max.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_max_stride, DT_FP32);
-        tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.51007}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
+        tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.353553}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
         tpu_bdc_load_fp32_exp_coeff(coeff_1.addr);
         tpu_bdc_load_fp32_exp_table(table_1.addr);
         tpu_bdc_fp32_exp(acc_s.addr, acc_s.addr, work0_1.addr, work1_1.addr, coeff_1.addr, table_1.addr, &acc_s.shape);
@@ -166,18 +186,14 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
   }
 }
 
-typedef struct {
-  global_addr_t v1;
-  global_addr_t v2;
-  global_addr_t v3;
-  global_addr_t v4;
-} tpu_kernel_api_main_args_t;
-void main_kernel(const void * args) {
-  tpu_kernel_api_main_args_t *api = (tpu_kernel_api_main_args_t*)args;
-  main(api->v1,
+int flashattn(const void * args) {
+  tpu_kernel_api_flashattn_t *api = (tpu_kernel_api_flashattn_t*)args;
+  tpu_initialize();
+  flashattn_inner(api->v1,
     api->v2,
     api->v3,
     api->v4);
   tpu_poll();
+  return 0;
 }
-TPUKERNEL_FUNC_REGISTER(main_kernel)
+TPUKERNEL_FUNC_REGISTER(flashattn)

@@ -8,7 +8,7 @@ T.copy = T.ppl_copy
 
 
 def flashattn(batch, heads, seq_len, dim, is_causal):
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / dim)**0.5
     shape = [batch, seq_len, heads, dim]
     dtype = "float32"
     accum_dtype = "float32"
