@@ -2079,6 +2079,26 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     } else if (buffer_node->dtype == DataType::BFloat(16)){
       dtype = "DT_BFP16";
       bytes_size = 2;
+    } else if (buffer_node->dtype == DataType::UInt(32)){
+      dtype = "DT_UINT32";
+      bytes_size = 4;
+    } else if (buffer_node->dtype == DataType::Int(32)){
+      dtype = "DT_INT32";
+      bytes_size = 4;
+    } else if (buffer_node->dtype == DataType::UInt(16)){
+      dtype = "DT_UINT16";
+      bytes_size = 2;
+    } else if (buffer_node->dtype == DataType::Int(16)){
+      dtype = "DT_INT16";
+      bytes_size = 2;
+    } else if (buffer_node->dtype == DataType::UInt(8)){
+      dtype = "DT_UINT8";
+      bytes_size = 1;
+    } else if (buffer_node->dtype == DataType::Int(8)){
+      dtype = "DT_INT8";
+      bytes_size = 1;
+    } else {
+      LOG(FATAL) << "Unsupported dtype " << buffer_node->dtype;
     }
     tensor_size *= bytes_size;
     std::string inst =
