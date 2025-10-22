@@ -30,15 +30,17 @@ void mm2_bfp16_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3) {
   __ppl_tensor_info v5 = {.shape = {1 ,768, 1, 768}, .stride = NULL, .addr = v2, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 1179648, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v4 = {.shape = {1 ,384, 1, 768}, .stride = NULL, .addr = v1, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 589824, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info C_tmp = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 0, .dtype = DT_FP32, .mode = 2, .align_mode = 1, .size = 1024, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info A_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 81920, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info B_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 65536, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info A_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 49152, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info B_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 32768, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info C_shared = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 16384, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info A_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 196608, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info B_shared_0 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 163840, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info A_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 131072, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info B_shared_1 = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 98304, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info C_shared = {.shape = { 1, 128, 1, 128}, .stride = NULL, .addr = 65536, .dtype = DT_BFP16, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = true};
   for (int bx = 0; bx < 6; ++bx) {
     for (int by = 0; by < 3; ++by) {
+      {
       scalar_t C_tmp_scalar_f32 = {.f32 = 0};
       tpu_bdc_set_C(C_tmp.addr, C_tmp_scalar_f32, &C_tmp.shape, (C_tmp.default_stride ? NULL : &C_tmp.stride), DT_FP32);
+      }
       __ppl_tensor_info A_shared = A_shared_0;
       __ppl_tensor_info A = {.shape = {1, 128, 1, 128}, .stride = {294912, 768, 768, 1} , .addr = v4.addr + (((by * 128)) * 768+(0) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((by * 128)) * 768+(0) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
       __ppl_tensor_info A_shared_2 = {.shape = {1, 128, 1, 128}, .stride = NULL, .addr = A_shared.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};

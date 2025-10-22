@@ -38,5 +38,5 @@ def rms_norm_splitk(M, N, blk_m, blk_k, dtype):
 
 
 dtype = "float"
-func = rms_norm_splitk(512, 512, 16, 16, dtype)
+func = rms_norm_splitk(512, 512, 32, 32, dtype)
 mod = tilelang.lower(func)
