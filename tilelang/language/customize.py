@@ -152,6 +152,10 @@ def ppl_fill(buffer, value):
     return T.call_extern("handle", "ppl.fill", buffer, value)
 
 
+def ppl_clear(buffer):
+    return T.ppl_fill(buffer, T.float32(0))
+
+
 def ppl_subtract(out, inp1, inp2):
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
@@ -270,6 +274,7 @@ def ppl_reduce_max(inp, out, dim, clear=True):
     assert dim == 1, "Only dim=1 is supported"
     # 调用不含断言的宏函数
     return ppl_reduce_max_safe(inp, out, dim, clear)
+
 
 def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     outptr = out.access_ptr("w")

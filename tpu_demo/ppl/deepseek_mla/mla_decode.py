@@ -7,7 +7,7 @@ import tilelang.language as T
 T.copy = T.ppl_copy
 
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
-    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / (dim + pe_dim))**0.5
     dtype = "float16"
     accum_dtype = "float"
     kv_group_num = heads // kv_head_num
@@ -16,13 +16,13 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.prim_func
     def main(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+        Q: T.Tensor([batch, 1, heads, dim], dtype),
+        Q_pe: T.Tensor([batch, 1, heads, pe_dim], dtype),
         KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+        Output: T.Tensor([batch, 1, heads, dim], dtype),
     ):
-        with T.Kernel(batch, heads // VALID_BLOCK_H, threads=16, is_cpu=True) as (bx, by):
+        with T.Kernel(batch, T.ceildiv(heads, VALID_BLOCK_H), is_cpu=True) as (bx, by):
             # --- allocate buffers ---
             Q_shared    = T.alloc_shared([VALID_BLOCK_H, dim], dtype)
             Q_pe_shared = T.alloc_shared([VALID_BLOCK_H, pe_dim], dtype)
@@ -43,8 +43,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             cur_kv_head = by // (kv_group_num // VALID_BLOCK_H)
 
             # --- preload Q / Q_pe tile for these heads ---
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, :, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
+            T.copy(Q_pe[bx, :, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
 
             # --- init accumulators (online softmax state) ---
             T.ppl_fill(acc_o, T.float32(0))
@@ -58,7 +58,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
 
                 # 2) scores tile = Q@K^T + Q_pe@K_pe^T
-                T.clear(acc_s)
+                T.ppl_clear(acc_s)
                 T.ppl_gemm(Q_shared, KV_shared, acc_s, transpose_B=True)
                 T.ppl_gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True)
 
@@ -113,7 +113,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             # 6) store
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+            T.copy(O_shared, Output[bx, :, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
 
     return main
 
