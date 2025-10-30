@@ -1,13 +1,33 @@
 #include "ppl_helper.h"
+
 static data_type_t __ppl_get_dtype(int type) {
   data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,
-    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
-    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
-    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
+      DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
+      DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
+      DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
   return __dtype[type];
 }
 
-void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4, global_addr_t v5) {
+typedef struct {
+  dim4 shape;
+  dim4 stride;
+  global_addr_t addr;
+  data_type_t dtype;
+  int mode;
+  int align_mode;
+  int size;
+  int offset;
+  bool unsigned_flag;
+  bool default_stride;
+} __ppl_tensor_info;
+typedef struct {
+  global_addr_t v1_v1;
+  global_addr_t v2_v2;
+  global_addr_t v3_v3;
+  global_addr_t v4_v4;
+  global_addr_t v5_v5;
+} tpu_kernel_api_flashattn_t;
+void flashattn_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4, global_addr_t v5) {
   __ppl_tensor_info v10 = {.shape = {4, 1, 8, 32}, .stride = NULL, .addr = v5, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = 2048, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v9 = {.shape = {4, 512, 1, 4}, .stride = NULL, .addr = v4, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = 16384, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v8 = {.shape = {4, 512, 1, 32}, .stride = NULL, .addr = v3, .dtype = DT_FP16, .mode = 2, .align_mode = 0, .size = 131072, .unsigned_flag = 0, .default_stride = true};
@@ -76,7 +96,7 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
       __ppl_tensor_info KV_shared_4 = {.shape = {1, 4, 1, 32}, .stride = NULL, .addr = KV_shared_3.addr, .dtype = DT_FP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       tpu_gdma_cpy_S2L(KV_shared_4.addr, KV_1.addr, &KV_shared_4.shape, (KV_shared_4.default_stride ? NULL : &KV_shared_4.stride), (KV_1.default_stride ? NULL : &KV_1.stride), DT_FP16);
       for (int k = 0; k < 126; ++k) {
-        tpu_parallel_start(); 
+        tpu_parallel_start();
         {
         scalar_t acc_s_scalar_f32 = {.f32 = 0};
         tpu_bdc_set_C(acc_s.addr, acc_s_scalar_f32, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
@@ -143,18 +163,22 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
           pad_val.u32 = FP_NEG_MAX(DT_FP32);
           tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, &kernel2, &pad, &stride, &dilation, DT_FP32, pad_val);
         }
-        tpu_bdc_fp_mul_C( prev_scaled.addr, scores_max_prev.addr, (scalar_t){.f32 = 0.240449}, &prev_scaled.shape, (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), DT_FP32);
-        tpu_bdc_fp_mul_C( curr_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.240449}, &curr_scaled.shape, (curr_scaled.default_stride ? NULL : &curr_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-        tpu_bdc_fp_sub( scores_scale.addr, prev_scaled.addr, curr_scaled.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (curr_scaled.default_stride ? NULL : &curr_scaled.stride), DT_FP32);
+        tpu_bdc_fp_mul_C( prev_scaled.addr, scores_max_prev.addr, (scalar_t){.f32 = 0.166667}, &prev_scaled.shape, (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), DT_FP32);
+        tpu_bdc_fp_mul_C( curr_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.166667}, &curr_scaled.shape, (curr_scaled.default_stride ? NULL : &curr_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
+        {
+          tpu_bdc_fp_sub( scores_scale.addr, prev_scaled.addr, curr_scaled.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (curr_scaled.default_stride ? NULL : &curr_scaled.stride), DT_FP32);
+        }
         tpu_bdc_load_fp32_exp_coeff(coeff.addr);
         tpu_bdc_load_fp32_exp_table(table.addr);
         tpu_bdc_fp32_exp(scores_scale.addr, scores_scale.addr, work0.addr, work1.addr, coeff.addr, table.addr, &scores_scale.shape);
-        tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.240449}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
-        tpu_bdc_fp_mul_C( scores_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.240449}, &scores_scaled.shape, (scores_scaled.default_stride ? NULL : &scores_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-        dim4 scores_scaled_stride;
-        tpu_aligned_stride(&scores_scaled_stride, 0, &scores_scaled.shape, DT_FP32);
-        scores_scaled_stride.w = 0;
-        tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_scaled.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_scaled_stride, DT_FP32);
+        tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.166667}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
+        tpu_bdc_fp_mul_C( scores_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.166667}, &scores_scaled.shape, (scores_scaled.default_stride ? NULL : &scores_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
+        {
+          dim4 scores_scaled_stride;
+          tpu_aligned_stride(&scores_scaled_stride, 0, &scores_scaled.shape, DT_FP32);
+          scores_scaled_stride.w = 0;
+          tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_scaled.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_scaled_stride, DT_FP32);
+        }
         tpu_bdc_load_fp32_exp_coeff(coeff.addr);
         tpu_bdc_load_fp32_exp_table(table.addr);
         tpu_bdc_fp32_exp(acc_s.addr, acc_s.addr, work0_1.addr, work1_1.addr, coeff.addr, table.addr, &acc_s.shape);
@@ -190,12 +214,18 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
         __ppl_tensor_info acc_s_1 = {.shape = {1, 4, 1, 4}, .stride = NULL, .addr = acc_s.addr, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
         __ppl_tensor_info S_shared_1 = {.shape = {1, 4, 1, 4}, .stride = NULL, .addr = S_shared.addr, .dtype = DT_FP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
         tpu_bdc_cast(S_shared_1.addr, acc_s_1.addr, &S_shared_1.shape, (S_shared_1.default_stride ? NULL : &S_shared_1.stride), (acc_s_1.default_stride ? NULL : &acc_s_1.stride), DT_FP16, DT_FP32, RM_HALF_TO_EVEN);
-        tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
-        tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
-        dim4 scores_scale_stride;
-        tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
-        scores_scale_stride.w = 0;
-        tpu_bdc_fp_mul( acc_o.addr, acc_o.addr, scores_scale.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &scores_scale_stride, DT_FP32);
+        {
+          tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
+        }
+        {
+          tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
+        }
+        {
+          dim4 scores_scale_stride;
+          tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
+          scores_scale_stride.w = 0;
+          tpu_bdc_fp_mul( acc_o.addr, acc_o.addr, scores_scale.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &scores_scale_stride, DT_FP32);
+        }
         __ppl_tensor_info  condval_3;
         if (((k % 2) == 0)) {
           condval_3 = KV_shared_0;
@@ -214,7 +244,7 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
         __ppl_tensor_info KV_2 = {.shape = {1, 4, 1, 32} , .stride = {16384, 32, 32, 1} , .addr = v8.addr + ((bx) * 16384+(((k * 4) + 8)) * 32+(0) * 32+(0) * 1 ) * 2, .dtype = DT_FP16, .mode = 2, .size = 1, .offset = ((bx) * 16384+(((k * 4) + 8)) * 32+(0) * 32+(0) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
         __ppl_tensor_info KV_shared_8 = {.shape = {1, 4, 1, 32}, .stride = NULL, .addr = KV_shared_7.addr, .dtype = DT_FP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
         tpu_gdma_cpy_S2L(KV_shared_8.addr, KV_2.addr, &KV_shared_8.shape, (KV_shared_8.default_stride ? NULL : &KV_shared_8.stride), (KV_2.default_stride ? NULL : &KV_2.stride), DT_FP16);
-        tpu_parallel_end(); 
+        tpu_parallel_end();
       }
       {
       scalar_t acc_s_scalar_f32 = {.f32 = 0};
@@ -260,18 +290,22 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
         pad_val.u32 = FP_NEG_MAX(DT_FP32);
         tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, &kernel2, &pad, &stride, &dilation, DT_FP32, pad_val);
       }
-      tpu_bdc_fp_mul_C( prev_scaled.addr, scores_max_prev.addr, (scalar_t){.f32 = 0.240449}, &prev_scaled.shape, (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), DT_FP32);
-      tpu_bdc_fp_mul_C( curr_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.240449}, &curr_scaled.shape, (curr_scaled.default_stride ? NULL : &curr_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-      tpu_bdc_fp_sub( scores_scale.addr, prev_scaled.addr, curr_scaled.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (curr_scaled.default_stride ? NULL : &curr_scaled.stride), DT_FP32);
+      tpu_bdc_fp_mul_C( prev_scaled.addr, scores_max_prev.addr, (scalar_t){.f32 = 0.166667}, &prev_scaled.shape, (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), DT_FP32);
+      tpu_bdc_fp_mul_C( curr_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.166667}, &curr_scaled.shape, (curr_scaled.default_stride ? NULL : &curr_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
+      {
+        tpu_bdc_fp_sub( scores_scale.addr, prev_scaled.addr, curr_scaled.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (curr_scaled.default_stride ? NULL : &curr_scaled.stride), DT_FP32);
+      }
       tpu_bdc_load_fp32_exp_coeff(coeff.addr);
       tpu_bdc_load_fp32_exp_table(table.addr);
       tpu_bdc_fp32_exp(scores_scale.addr, scores_scale.addr, work0.addr, work1.addr, coeff.addr, table.addr, &scores_scale.shape);
-      tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.240449}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
-      tpu_bdc_fp_mul_C( scores_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.240449}, &scores_scaled.shape, (scores_scaled.default_stride ? NULL : &scores_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-      dim4 scores_scaled_stride;
-      tpu_aligned_stride(&scores_scaled_stride, 0, &scores_scaled.shape, DT_FP32);
-      scores_scaled_stride.w = 0;
-      tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_scaled.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_scaled_stride, DT_FP32);
+      tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.166667}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
+      tpu_bdc_fp_mul_C( scores_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.166667}, &scores_scaled.shape, (scores_scaled.default_stride ? NULL : &scores_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
+      {
+        dim4 scores_scaled_stride;
+        tpu_aligned_stride(&scores_scaled_stride, 0, &scores_scaled.shape, DT_FP32);
+        scores_scaled_stride.w = 0;
+        tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_scaled.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_scaled_stride, DT_FP32);
+      }
       tpu_bdc_load_fp32_exp_coeff(coeff.addr);
       tpu_bdc_load_fp32_exp_table(table.addr);
       tpu_bdc_fp32_exp(acc_s.addr, acc_s.addr, work0_1.addr, work1_1.addr, coeff.addr, table.addr, &acc_s.shape);
@@ -307,12 +341,18 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
       __ppl_tensor_info acc_s_2 = {.shape = {1, 4, 1, 4}, .stride = NULL, .addr = acc_s.addr, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       __ppl_tensor_info S_shared_2 = {.shape = {1, 4, 1, 4}, .stride = NULL, .addr = S_shared.addr, .dtype = DT_FP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       tpu_bdc_cast(S_shared_2.addr, acc_s_2.addr, &S_shared_2.shape, (S_shared_2.default_stride ? NULL : &S_shared_2.stride), (acc_s_2.default_stride ? NULL : &acc_s_2.stride), DT_FP16, DT_FP32, RM_HALF_TO_EVEN);
-      tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
-      tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
-      dim4 scores_scale_stride;
-      tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
-      scores_scale_stride.w = 0;
-      tpu_bdc_fp_mul( acc_o.addr, acc_o.addr, scores_scale.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &scores_scale_stride, DT_FP32);
+      {
+        tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
+      }
+      {
+        tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
+      }
+      {
+        dim4 scores_scale_stride;
+        tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
+        scores_scale_stride.w = 0;
+        tpu_bdc_fp_mul( acc_o.addr, acc_o.addr, scores_scale.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &scores_scale_stride, DT_FP32);
+      }
       __ppl_tensor_info KV_shared_10 = KV_shared_0;
       tpu_bdc_fp_mm(acc_o.addr, S_shared.addr, KV_shared_10.addr, 4, 4, 32, DT_FP32, DT_FP16, true);
       {
@@ -359,18 +399,22 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
         pad_val.u32 = FP_NEG_MAX(DT_FP32);
         tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, &tmp_view2.shape, &kernel2, &pad, &stride, &dilation, DT_FP32, pad_val);
       }
-      tpu_bdc_fp_mul_C( prev_scaled.addr, scores_max_prev.addr, (scalar_t){.f32 = 0.240449}, &prev_scaled.shape, (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), DT_FP32);
-      tpu_bdc_fp_mul_C( curr_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.240449}, &curr_scaled.shape, (curr_scaled.default_stride ? NULL : &curr_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-      tpu_bdc_fp_sub( scores_scale.addr, prev_scaled.addr, curr_scaled.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (curr_scaled.default_stride ? NULL : &curr_scaled.stride), DT_FP32);
+      tpu_bdc_fp_mul_C( prev_scaled.addr, scores_max_prev.addr, (scalar_t){.f32 = 0.166667}, &prev_scaled.shape, (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (scores_max_prev.default_stride ? NULL : &scores_max_prev.stride), DT_FP32);
+      tpu_bdc_fp_mul_C( curr_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.166667}, &curr_scaled.shape, (curr_scaled.default_stride ? NULL : &curr_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
+      {
+        tpu_bdc_fp_sub( scores_scale.addr, prev_scaled.addr, curr_scaled.addr, &scores_scale.shape, (scores_scale.default_stride ? NULL : &scores_scale.stride), (prev_scaled.default_stride ? NULL : &prev_scaled.stride), (curr_scaled.default_stride ? NULL : &curr_scaled.stride), DT_FP32);
+      }
       tpu_bdc_load_fp32_exp_coeff(coeff.addr);
       tpu_bdc_load_fp32_exp_table(table.addr);
       tpu_bdc_fp32_exp(scores_scale.addr, scores_scale.addr, work0.addr, work1.addr, coeff.addr, table.addr, &scores_scale.shape);
-      tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.240449}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
-      tpu_bdc_fp_mul_C( scores_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.240449}, &scores_scaled.shape, (scores_scaled.default_stride ? NULL : &scores_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
-      dim4 scores_scaled_stride;
-      tpu_aligned_stride(&scores_scaled_stride, 0, &scores_scaled.shape, DT_FP32);
-      scores_scaled_stride.w = 0;
-      tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_scaled.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_scaled_stride, DT_FP32);
+      tpu_bdc_fp_mul_C( acc_s.addr, acc_s.addr, (scalar_t){.f32 = 0.166667}, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), DT_FP32);
+      tpu_bdc_fp_mul_C( scores_scaled.addr, scores_max.addr, (scalar_t){.f32 = 0.166667}, &scores_scaled.shape, (scores_scaled.default_stride ? NULL : &scores_scaled.stride), (scores_max.default_stride ? NULL : &scores_max.stride), DT_FP32);
+      {
+        dim4 scores_scaled_stride;
+        tpu_aligned_stride(&scores_scaled_stride, 0, &scores_scaled.shape, DT_FP32);
+        scores_scaled_stride.w = 0;
+        tpu_bdc_fp_sub( acc_s.addr, acc_s.addr, scores_scaled.addr, &acc_s.shape, (acc_s.default_stride ? NULL : &acc_s.stride), (acc_s.default_stride ? NULL : &acc_s.stride), &scores_scaled_stride, DT_FP32);
+      }
       tpu_bdc_load_fp32_exp_coeff(coeff.addr);
       tpu_bdc_load_fp32_exp_table(table.addr);
       tpu_bdc_fp32_exp(acc_s.addr, acc_s.addr, work0_1.addr, work1_1.addr, coeff.addr, table.addr, &acc_s.shape);
@@ -406,18 +450,26 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
       __ppl_tensor_info acc_s_3 = {.shape = {1, 4, 1, 4}, .stride = NULL, .addr = acc_s.addr, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       __ppl_tensor_info S_shared_3 = {.shape = {1, 4, 1, 4}, .stride = NULL, .addr = S_shared.addr, .dtype = DT_FP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       tpu_bdc_cast(S_shared_3.addr, acc_s_3.addr, &S_shared_3.shape, (S_shared_3.default_stride ? NULL : &S_shared_3.stride), (acc_s_3.default_stride ? NULL : &acc_s_3.stride), DT_FP16, DT_FP32, RM_HALF_TO_EVEN);
-      tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
-      tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
-      dim4 scores_scale_stride;
-      tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
-      scores_scale_stride.w = 0;
-      tpu_bdc_fp_mul( acc_o.addr, acc_o.addr, scores_scale.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &scores_scale_stride, DT_FP32);
+      {
+        tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
+      }
+      {
+        tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
+      }
+      {
+        dim4 scores_scale_stride;
+        tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
+        scores_scale_stride.w = 0;
+        tpu_bdc_fp_mul( acc_o.addr, acc_o.addr, scores_scale.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &scores_scale_stride, DT_FP32);
+      }
       __ppl_tensor_info KV_shared_12 = KV_shared_1;
       tpu_bdc_fp_mm(acc_o.addr, S_shared.addr, KV_shared_12.addr, 4, 4, 32, DT_FP32, DT_FP16, true);
-      dim4 logsum_stride;
-      tpu_aligned_stride(&logsum_stride, 0, &logsum.shape, DT_FP32);
-      logsum_stride.w = 0;
-      tpu_bdc_fp_div( acc_o.addr, acc_o.addr, logsum.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &logsum_stride, DT_FP32);
+      {
+        dim4 logsum_stride;
+        tpu_aligned_stride(&logsum_stride, 0, &logsum.shape, DT_FP32);
+        logsum_stride.w = 0;
+        tpu_bdc_fp_div( acc_o.addr, acc_o.addr, logsum.addr, &acc_o.shape, (acc_o.default_stride ? NULL : &acc_o.stride), (acc_o.default_stride ? NULL : &acc_o.stride), &logsum_stride, DT_FP32);
+      }
       __ppl_tensor_info acc_o_1 = {.shape = {1, 4, 1, 32}, .stride = NULL, .addr = acc_o.addr, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       __ppl_tensor_info O_shared_1 = {.shape = {1, 4, 1, 32}, .stride = NULL, .addr = O_shared.addr, .dtype = DT_FP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = true};
       tpu_bdc_cast(O_shared_1.addr, acc_o_1.addr, &O_shared_1.shape, (O_shared_1.default_stride ? NULL : &O_shared_1.stride), (acc_o_1.default_stride ? NULL : &acc_o_1.stride), DT_FP16, DT_FP32, RM_HALF_TO_EVEN);
@@ -428,20 +480,15 @@ void main(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4
   }
 }
 
-typedef struct {
-  global_addr_t v1;
-  global_addr_t v2;
-  global_addr_t v3;
-  global_addr_t v4;
-  global_addr_t v5;
-} tpu_kernel_api_main_args_t;
-void main_kernel(const void * args) {
-  tpu_kernel_api_main_args_t *api = (tpu_kernel_api_main_args_t*)args;
-  main(api->v1,
-    api->v2,
-    api->v3,
-    api->v4,
-    api->v5);
+int flashattn(const void * args) {
+  tpu_kernel_api_flashattn_t *api = (tpu_kernel_api_flashattn_t*)args;
+  tpu_initialize();
+  flashattn_inner(api->v1_v1,
+    api->v2_v2,
+    api->v3_v3,
+    api->v4_v4,
+    api->v5_v5);
   tpu_poll();
+  return 0;
 }
-TPUKERNEL_FUNC_REGISTER(main_kernel)
+TPUKERNEL_FUNC_REGISTER(flashattn)
