@@ -767,6 +767,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (!has_dtype) {
       dtype = "";
     }
+    this->PrintIndent();
+    int sid = this->BeginScope();
+    this->stream << "{\n";
+    
     std::stringstream src1_stride =
         process_stride(src0_shape, src1_shape, src0, src1, dtype);
     this->PrintIndent();
@@ -777,6 +781,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ".stride), "
                  << "(" << src0 << ".default_stride ? NULL : &" << src0
                  << ".stride), " << src1_stride.str() << dtype << ");\n";
+    
+    this->EndScope(sid);
+    this->PrintIndent();
+    this->stream << "}\n";
   };
   // void tpu_bdc_fp_mul_C(local_addr_t dst_addr, local_addr_t src_addr,
   // scalar_t C, const dim4 *shape, const dim4 *dst_stride, const dim4
