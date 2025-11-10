@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import os
 from typing import Union, Optional, Literal
 from tilelang import tvm as tvm
 from tvm import IRModule, tir
@@ -62,6 +63,14 @@ def is_hip_target(target: Target) -> bool:
 def is_cpu_target(target: Target) -> bool:
     return target.kind.name in ["c"]
 
+def is_tpu_target(target: Target) -> bool:
+    if isinstance(target,str):
+        return target=="tpu"
+    return target.kind.name == "tpu"
+
+def get_tpu_template_dir() -> str:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(current_dir, "../../../src/tl_templates/tpu"))
 
 def get_annotated_mod(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],

@@ -1,3 +1,4 @@
+cp src/tl_templates/tpu/target_kind.cc 3rdparty/tvm/src/target/target_kind.cc
 mkdir build
 cp 3rdparty/tvm/cmake/config.cmake build
 cd build

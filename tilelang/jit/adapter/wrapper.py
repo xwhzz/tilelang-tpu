@@ -6,7 +6,7 @@ from tilelang import tvm as tvm
 from typing import Optional, List, Dict, Union, Any
 from tvm import IRModule
 from tvm.target import Target
-from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target, is_cpu_target, get_annotated_mod
+from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target, is_cpu_target, is_tpu_target, get_annotated_mod, get_tpu_template_dir
 import re
 import logging
 import textwrap
@@ -613,6 +613,192 @@ class TLCPUSourceWrapper(object):
                     return function
             raise ValueError("Cannot find primary function in the module.")
 
+# (xxw-keju,add wrapper for tpu backend)
+class TLTPUSourceWrapper(object):
+#    {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,
+#     DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
+#     DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
+#     DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
+    _TYPE_MAP = {
+        "float32": "DT_FP32",
+        "float16": "DT_FP16",
+        "int32": "DT_INT32",
+        "bfloat16": "DT_BFP16",
+    }
+
+    backend = "tl"
+    device_mod: Optional[IRModule] = None
+    host_mod: Optional[IRModule] = None
+    pass_configs: Optional[Dict[str, Any]] = None
+    output_indices: List[int] = []
+
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 device_mod: Optional[IRModule] = None,
+                 host_mod: Optional[IRModule] = None,
+                 pass_configs: Optional[Dict[str, Any]] = None,
+                 output_indices: Optional[List[int]] = None):
+        self.mod = scheduled_ir_module
+        self.target = target
+        self.source = source
+        self.device_mod = device_mod
+        self.host_mod = host_mod
+        self.pass_configs = pass_configs
+        self.output_indices = output_indices if output_indices is not None else []
+        self.function_args = None
+        self.function_names: Optional[str] = None
+        self.dynamic_smem_buf: Optional[int] = None
+        self.srcpath: Optional[str] = None
+        self.libpath: Optional[str] = None
+        self.lib_code: Optional[str] = self.update_lib_code(source)
+
+
+    def parse_func_args(self):
+        function_args = []
+        # Collect function arguments based on primary function's parameters and buffer mappings
+        for param in self.prim_func.params:
+            if param in self.prim_func.buffer_map:
+                buffer = self.prim_func.buffer_map[param]
+                function_args.append({
+                    "name": buffer.data.name,
+                    "type": self._TYPE_MAP[buffer.dtype],
+                    "shape": list(buffer.shape),
+                })
+            elif isinstance(param, tvm.tir.Var):
+                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+            else:
+                raise ValueError(
+                    f"Parameter {param} is not in the buffer map of the primary function.")
+        self.function_args = function_args
+        
+    def create_kernel_header(self, function_name: str = "main_kernel"):
+        num_params = len(self.function_args)
+        
+        template_file = get_tpu_template_dir() + "/kernel_template.h"
+        output_file = get_tpu_template_dir() + "/kernel.h"
+        with open(template_file, "r") as f: 
+            template_content = f.read()
+
+        # 生成参数相关的内容
+        param_names = [f"ptr_v{i+1}" for i in range(num_params)]
+        
+        # 结构体成员
+        struct_members = "\n  ".join([f"unsigned long long {name};" for name in param_names])
+        
+        # 函数参数
+        func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
+        struct_params = ", ".join([f"unsigned long long {name}" for i, name in enumerate(param_names)])
+        
+        
+        content = template_content.format(
+                    struct_members=struct_members,
+                    function_name=function_name,
+                    func_params=func_params,
+                    struct_params=struct_params
+                )
+        
+        with open(output_file, 'w') as f:
+            f.write(content)
+        
+
+    def create_kernel_cpp(self, function_name: str = "main_kernel"):
+        num_params = len(self.function_args)
+        template_file = get_tpu_template_dir() + "/kernel_template.cpp"
+        output_file = get_tpu_template_dir() + "/kernel.cpp"
+        with open(template_file, "r") as f: 
+            template_content = f.read()
+        
+        # 生成参数相关的内容
+        param_names = [f"ptr_v{i+1}" for i in range(num_params)]
+        func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
+        struct_assignments = "\n  ".join([f"api.{name} = {name};" for name in param_names])
+        
+        # 格式化内容
+        formatted_content = template_content.format(
+            function_name=function_name,
+            func_params=func_params,
+            struct_assignments=struct_assignments
+        )
+        
+        with open(output_file, 'w') as f:
+            f.write(formatted_content)
+        
+
+    def create_main_cpp(self, function_name: str = "main_kernel"):
+        template_file = get_tpu_template_dir() + "/main_template.cpp"
+        output_file = get_tpu_template_dir() + "/main.cpp"
+        with open(template_file, "r") as f: 
+            template_content = f.read()
+        
+        # 生成各个代码段
+        arg_declarations = []
+        device_declarations = []
+        malloc_statements = []
+        memcpy_s2d_statements = []
+        memcpy_d2s_statements = []
+        free_statements = []
+        kernel_call_args = []
+        
+        for i, arg in enumerate(self.function_args):
+            arg_name = arg["name"]
+            data_size = " * ".join([str(dim) for dim in arg["shape"]]) + f" * sizeof({arg['type']})"
+            
+            arg_declarations.append(f'  char* {arg_name} = argv[{i + 1}];')
+            arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
+            device_declarations.append(f'  void *dev_{arg_name};')
+            malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')
+            memcpy_s2d_statements.append(f'  tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size);')
+            
+            if i in self.output_indices:
+                memcpy_d2s_statements.append(f'  tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size);')
+            
+            free_statements.append(f'  tpuRtFree(&dev_{arg_name}, 0);')
+            kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
+        
+        kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
+        
+        # 格式化内容
+        formatted_content = template_content.format(
+            arg_declarations="\n".join(arg_declarations),
+            device_declarations="\n".join(device_declarations),
+            malloc_statements="\n".join(malloc_statements),
+            memcpy_s2d_statements="\n".join(memcpy_s2d_statements),
+            memcpy_d2s_statements="\n".join(memcpy_d2s_statements),
+            free_statements="\n".join(free_statements),
+            kernel_call=kernel_call
+        )
+        
+        if output_file is None:
+            output_file = f"test_{function_name}.cpp"
+        
+        with open(output_file, 'w') as f:
+            f.write(formatted_content)
+        
+
+    def update_lib_code(self, code: str):
+        # Update the library code with the given code string
+        self.parse_func_args()
+        self.create_kernel_header()
+        self.create_kernel_cpp()
+        self.create_main_cpp()
+        self.lib_code = code
+        return self.lib_code
+
+    @property
+    def prim_func(self):
+        if len(self.mod.get_global_vars()) == 1:
+            return self.mod[self.mod.get_global_vars()[0]]
+        elif "main" in self.mod:
+            return self.mod["main"]
+        else:
+            for _, function in self.mod.functions_items():
+                attr = function.attrs
+                if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
+                    return function
+            raise ValueError("Cannot find primary function in the module.")
+
 
 class TLWrapper(BaseWrapper):
     """
@@ -623,6 +809,7 @@ class TLWrapper(BaseWrapper):
     pass_configs: Optional[Dict[str, Any]] = None
     target: Optional[Target] = None
     lib: Optional[object] = None
+    output_indices: List[int] = []
 
     def __init__(self, target: Target):
         super().__init__()
@@ -643,6 +830,9 @@ class TLWrapper(BaseWrapper):
     def assign_device_module(self, device_mod: IRModule):
         self.device_mod = device_mod
 
+    def assign_output_indices(self, output_indices: List[int]):
+        self.output_indices = output_indices
+
     # Get Scheduled Rt Module and return source to be compiled
     def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
@@ -652,13 +842,27 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLHIPSourceWrapper
         elif is_cpu_target(self.target):
             wrapper_class = TLCPUSourceWrapper
+        elif is_tpu_target(self.target):
+            wrapper_class = TLTPUSourceWrapper
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")
-        wrapper = wrapper_class(
-            scheduled_ir_module=self.scheduled_ir_module,
-            source=c_source,
-            target=self.target,
-            device_mod=self.device_mod,
-            host_mod=self.host_mod,
-            pass_configs=self.pass_configs)
+        if not is_tpu_target(self.target):
+            wrapper = wrapper_class(
+                scheduled_ir_module=self.scheduled_ir_module,
+                source=c_source,
+                target=self.target,
+                device_mod=self.device_mod,
+                host_mod=self.host_mod,
+                pass_configs=self.pass_configs
+                )
+        else:
+            wrapper = wrapper_class(
+                scheduled_ir_module=self.scheduled_ir_module,
+                source=c_source,
+                target=self.target,
+                device_mod=self.device_mod,
+                host_mod=self.host_mod,
+                pass_configs=self.pass_configs,
+                output_indices=self.output_indices
+                )
         return wrapper.lib_code

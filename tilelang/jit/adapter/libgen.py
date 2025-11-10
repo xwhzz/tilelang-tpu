@@ -1,7 +1,7 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 from typing import Optional
-from .utils import is_cuda_target, is_hip_target, is_cpu_target
+from .utils import is_cuda_target, is_hip_target, is_cpu_target, is_tpu_target
 from tilelang import tvm as tvm
 from tilelang.contrib.nvcc import get_target_compute_version
 from tvm.target import Target
@@ -11,6 +11,7 @@ import tempfile
 import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+from tilelang.jit.adapter.utils import get_tpu_template_dir
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,160 @@ class LibraryGenerator(object):
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
+        elif is_tpu_target(target):
+
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".c", delete=False)
+            libpath = src.name.replace(".c", ".so")
+
+
+            import os
+            # 设置环境变量
+            PPL_TOP = os.environ.get("PPL_PROJECT_ROOT", None)
+            if not PPL_TOP:
+                raise EnvironmentError("PPL_PROJECT_ROOT environment variable is not set.")
+            CHIP = "bm1690"
+            TOOLCHAIN_DIR = f"{PPL_TOP}/third_party/toolchains_dir/Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1"
+            CROSS_COMPILE = f"{TOOLCHAIN_DIR}/bin/riscv64-unknown-linux-gnu-"
+
+            # 构建包含路径
+            includes = [
+                "-I/lib/x86_64-linux-gnu/",
+                "-I./build/include",
+                f"-I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include",
+                f"-I{PPL_TOP}/runtime/kernel",
+                f"-I{PPL_TOP}/runtime/customize/include",
+                f"-I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include"
+            ]
+
+            # 构建库路径
+            lib_paths = [
+                "-L/lib/x86_64-linux-gnu/",
+                f"-L{PPL_TOP}/runtime/{CHIP}/lib",
+                "-L/opt/tpuv7/tpuv7-current/lib/",
+                f"-L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib"
+            ]
+            src_dir = get_tpu_template_dir()
+
+            # 编译kernel.c
+            cmd1 = [
+                f"{CROSS_COMPILE}gcc",
+                "-D__bm1690__",
+                "-Dlibkernel_EXPORTS",
+                *includes,
+                "-Wl,--no-undefined",
+                "-fPIC",
+                "-c",
+                f"{src_dir}/kernel.c",
+                "-o",
+                f"{src_dir}/kernel.o"
+            ]
+
+            # 编译ppl_helper.c
+            cmd2 = [
+                f"{CROSS_COMPILE}gcc", 
+                "-D__bm1690__",
+                "-Dlibkernel_EXPORTS",
+                *includes,
+                "-Wl,--no-undefined",
+                "-fPIC",
+                "-c",
+                f"{PPL_TOP}/runtime/customize/src/ppl_helper.c",
+                "-o",
+                f"{src_dir}/ppl_helper.o"
+            ]
+
+            # 链接命令 - 创建共享库
+            link_cmd = [
+                f"{CROSS_COMPILE}gcc",
+                "-fPIC",
+                "-Wl,--no-undefined", 
+                "-shared",
+                "-Wl,-soname,libkernel.so",
+                "-o", f"{src_dir}/libkernel.so",
+                f"{src_dir}/kernel.o",
+                f"{src_dir}/ppl_helper.o",
+                *lib_paths,
+                "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
+                "-Wl,--whole-archive",
+                "-Wl,-Bstatic",
+                f"-l{CHIP}",
+                "-Wl,-Bdynamic", 
+                "-Wl,--no-whole-archive",
+                "-lm"
+            ]
+
+            try:
+                ret1 = subprocess.run(cmd1, timeout=timeout)
+                ret2 = subprocess.run(cmd2, timeout=timeout)
+                ret3 = subprocess.run(link_cmd, timeout=timeout)
+            except Exception as e:
+                raise RuntimeError(f"Compile kernel failed because of {e}") from e
+
+            if ret1.returncode != 0 or ret2.returncode != 0 or ret3.returncode != 0:
+                raise RuntimeError(f"Compilation Failed! {link_cmd}")
+
+
+
+            
+            # 1. 编译main.cpp
+            cmd4 = [
+                "g++",
+                f"-D__{CHIP}__",
+                *includes,
+                "-Wl,--no-undefined",
+                "-std=c++11",
+                "-fPIC",
+                "-c",
+                f"{src_dir}/kernel.cpp",
+                "-o",
+                f"{src_dir}/kernel_host.o"
+            ]
+            
+            # 2. 编译main.cpp
+            cmd5 = [
+                "g++",
+                f"-D__{CHIP}__", 
+                *includes,
+                "-Wl,--no-undefined",
+                "-std=c++11",
+                "-fPIC", 
+                "-c",
+                f"{src_dir}/main.cpp",
+                "-o",
+                f"{src_dir}/main.o"
+            ]
+            
+            # 3. 生成动态库
+            cmd_shared = [
+                "g++",
+                "-shared",
+                "-fPIC",
+                "-Wl,--no-undefined",
+                "-o",
+                f"{src_dir}/main.so",
+                f"{src_dir}/kernel_host.o",
+                f"{src_dir}/main.o",
+                *lib_paths,
+                "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
+                "-ltpuv7_rt",
+                "-lcdm_daemon_emulator", 
+                "-lpthread"
+            ]
+
+            try:
+                ret1 = subprocess.run(cmd4, timeout=timeout)
+                ret2 = subprocess.run(cmd5, timeout=timeout)
+                ret3 = subprocess.run(cmd_shared, timeout=timeout)
+            except Exception as e:
+                raise RuntimeError(f"Compile kernel failed because of {e}") from e
+
+            if ret1.returncode != 0 or ret2.returncode != 0 or ret3.returncode != 0:
+                raise RuntimeError(f"Host Compilation Failed! {cmd_shared}")
+
+            self.srcpath = src.name
+            self.libpath = f"{src_dir}/main.so"
+            return
+
         else:
             raise ValueError(f"Unsupported target: {target}")
 

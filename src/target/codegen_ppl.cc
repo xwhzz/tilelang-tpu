@@ -85,8 +85,20 @@ std::string CodeGenTileLangPPL::Finish() {
               << "    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};\n"
               << "  return __dtype[type];\n"
               << "}\n\n";
+  decl_stream << "typedef struct {\n"
+              << "    dim4 shape;\n"
+              << "    dim4 stride;\n"
+              << "    global_addr_t addr;\n"
+              << "    data_type_t dtype;\n"
+              << "    int mode;\n"
+              << "    int align_mode;\n"
+              << "    int size;\n"
+              << "    int offset;\n"
+              << "    bool unsigned_flag;\n"
+              << "    bool default_stride;\n"
+              << "} __ppl_tensor_info;\n\n";
   return CodeGenC::Finish();
-}
+  }
 
 /* no need to change */
 void CodeGenTileLangPPL::VisitStmt_(const tir::ForNode *op) {
@@ -914,7 +926,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
 
           inst.push_back(
               "__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape +
-              ", .stride = NULL, .addr = " +
+              ", .stride = {0}, .addr = " +
               var_idmap_[src_buffer->data.get()] + ".addr, .dtype = " + dtype +
               ", .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, "
               ".default_stride = true};\n");
@@ -1620,7 +1632,7 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
     auto addr = f_attrs.GetAttr(vid, PrimExpr(0)).as<IntImmNode>()->value;
     buffer_addrs_[op->buffer_var.get()] = addr;
     stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape
-           << ", .stride = NULL"
+           << ", .stride = {0}"
            << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
            << ", .align_mode = 1"
            << ", .size = " << tensor_size
@@ -1751,7 +1763,9 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f, stream);
   std::string global_name = static_cast<std::string>(global_symbol.value());
-
+  if (global_name == "main") {
+    throw std::runtime_error("Kernel name 'main' is not allowed. Please use 'main_kernel_inner' as the kernel name.");
+  }
   this->stream << " " << global_name << "(";
   std::vector<std::string> params_name;
   // auto bf_map = f->buffer_map;
@@ -1820,7 +1834,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     tensor_size *= bytes_size;
     std::string inst =
         "__ppl_tensor_info " + rid + " = {.shape = " + shape_s +
-        ", .stride = NULL, .addr = " + vid + ", .dtype = " + dtype +
+        ", .stride = {0}, .addr = " + vid + ", .dtype = " + dtype +
         ", .mode = 2, .align_mode = 0, .size = " + std::to_string(tensor_size) +
         ", .unsigned_flag = 0, .default_stride = true};\n";
     var_global_mem_map[v_node] = inst;
@@ -1861,9 +1875,9 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   for (auto &name : params_name) {
     this->stream << "  " << restrict_keyword_ << " " << name << ";\n";
   }
-  std::string api_name = "tpu_kernel_api_" + global_name + "_args_t";
+  std::string api_name = "tpu_kernel_api_main_inner_args_t";
   this->stream << "} " << api_name << ";\n";
-  this->stream << "void " << global_name << "_kernel(const void * args) {\n"
+  this->stream << "void " << "main_kernel(const void * args) {\n"
                << "  " << api_name << " *api = (" << api_name << "*)args;\n"
                << "  " << global_name << "(";
   int name_index = 0;
@@ -1881,7 +1895,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     name_index += 1;
   }
   this->stream << "  tpu_poll();\n}\n";
-  this->stream << "TPUKERNEL_FUNC_REGISTER(" << global_name << "_kernel)\n";
+  this->stream << "TPUKERNEL_FUNC_REGISTER(" << "main_kernel)\n";
 }
 
 } // namespace codegen
