@@ -16,11 +16,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.prim_func
     def main(
-        Q: T.Tensor([batch, 1, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, 1, heads, pe_dim], dtype),
+        Q: T.Tensor([batch, heads, 1, dim], dtype),
+        Q_pe: T.Tensor([batch, heads, 1, pe_dim], dtype),
         KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        Output: T.Tensor([batch, 1, heads, dim], dtype),
+        Output: T.Tensor([batch, heads, 1, dim], dtype),
     ):
         with T.Kernel(batch, T.ceildiv(heads, VALID_BLOCK_H), is_cpu=True) as (bx, by):
             # --- allocate buffers ---
@@ -32,6 +32,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             O_shared    = T.alloc_shared([VALID_BLOCK_H, dim], dtype)
 
             acc_s           = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
+            acc_s_pe        = T.alloc_shared([VALID_BLOCK_H, block_N], accum_dtype)
             acc_o           = T.alloc_shared([VALID_BLOCK_H, dim], accum_dtype)
             scores_max      = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
             scores_max_prev = T.alloc_shared([VALID_BLOCK_H, 1], accum_dtype)
@@ -43,8 +44,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             cur_kv_head = by // (kv_group_num // VALID_BLOCK_H)
 
             # --- preload Q / Q_pe tile for these heads ---
-            T.copy(Q[bx, :, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, :, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :, :], Q_shared)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :, :], Q_pe_shared)
 
             # --- init accumulators (online softmax state) ---
             T.ppl_fill(acc_o, T.float32(0))
@@ -52,7 +53,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.ppl_fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv(seqlen_kv, block_N)
-            for k in T.Pipelined(loop_range, num_stages=2):
+            for k in T.Pipelined(loop_range, num_stages=2): # num_stages=2, k<126
                 # 1) load K / K_pe tile
                 T.copy(KV [bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
@@ -60,7 +61,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 # 2) scores tile = Q@K^T + Q_pe@K_pe^T
                 T.ppl_clear(acc_s)
                 T.ppl_gemm(Q_shared, KV_shared, acc_s, transpose_B=True)
-                T.ppl_gemm(Q_pe_shared, K_pe_shared, acc_s, transpose_B=True)
+                T.ppl_clear(acc_s_pe)
+                T.ppl_gemm(Q_pe_shared, K_pe_shared, acc_s_pe, transpose_B=True)
+                T.ppl_add(acc_s, acc_s, acc_s_pe)
 
                 # 3) online softmax (row-wise)
                 T.copy(scores_max, scores_max_prev)
@@ -113,7 +116,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             # 6) store
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bx, :, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+            T.copy(O_shared, Output[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :, :])
 
     return main
 
