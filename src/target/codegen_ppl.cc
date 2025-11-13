@@ -1501,7 +1501,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         dtype_2 = "u8";
         dtype_size = "1";
       } else {
-        LOG(FATAL) << "Embedding only supports Float16 currently";
+        LOG(FATAL) << "Embedding: unsupported data type for params/output: " << dtype_;
       }
       std::string dtype1, dtype1_2 ,dtype1_size;
       auto dtype1_ = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
@@ -1554,13 +1554,31 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "dim4 ori_index_shape = {1, " << index_num << ", 1, 1};\n";
       this->PrintIndent();
-      this->stream << "dim4 ori_output_stride = {" << index_num * inner_num << ", " << inner_num << "," << inner_num <<", 1};\n";
+      // 64-byte aligned layout: 根据数据类型确定对齐参数
+      // 32-bits (4 bytes): C_stride = ceil(H*W, 16) * 16
+      // 16-bits (2 bytes): C_stride = ceil(H*W, 32) * 32
+      // 8-bits  (1 byte):  C_stride = ceil(H*W, 64) * 64
+      std::string align_value;
+      if (dtype_size == "4") {
+        align_value = "16";  // FP32, INT32等
+      } else if (dtype_size == "2") {
+        align_value = "32";  // FP16, BFP16, INT16等
+      } else if (dtype_size == "1") {
+        align_value = "64";  // INT8, UINT8
+      } else {
+        LOG(FATAL) << "Unsupported dtype_size for embedding: " << dtype_size;
+      }
+      this->stream << "int ori_output_c_stride = ((" << inner_num << " + " << align_value << " - 1) / " << align_value << ") * " << align_value << ";\n";
       this->PrintIndent();
-      this->stream << "dim4 ori_params_stride = {" << select_num * inner_num << ", " << inner_num << "," << inner_num <<", 1};\n";
+      this->stream << "int ori_params_c_stride = ((" << inner_num << " + " << align_value << " - 1) / " << align_value << ") * " << align_value << ";\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_output_stride = {ori_output_c_stride * " << index_num << ", ori_output_c_stride, " << inner_num << ", 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 ori_params_stride = {ori_params_c_stride * " << select_num << ", ori_params_c_stride, " << inner_num << ", 1};\n";
       this->PrintIndent();
       this->stream << "dim4 ori_index_stride = {" << index_num << ", 1, 1, 1};\n";
 
-      // 定义计算时形状
+      // 定义计算时形状（转置后）
       this->PrintIndent();
       this->stream << "dim4 output_shape = {1, " << inner_num << ", 1, " << index_num << "};\n";
       this->PrintIndent();
@@ -1568,9 +1586,14 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "dim4 index_shape = {1, " << index_num << ", 1, 1};\n";
       this->PrintIndent();
-      this->stream << "dim4 output_stride = {" << index_num * inner_num << ", " << index_num << "," << index_num <<", 1};\n";
+      // 转置后的64-byte对齐
+      this->stream << "int output_c_stride_aligned = ((" << index_num << " + " << align_value << " - 1) / " << align_value << ") * " << align_value << ";\n";
       this->PrintIndent();
-      this->stream << "dim4 params_stride = {" << select_num * inner_num << ", " << select_num << "," << select_num <<", 1};\n";
+      this->stream << "int params_c_stride_aligned = ((" << select_num << " + " << align_value << " - 1) / " << align_value << ") * " << align_value << ";\n";
+      this->PrintIndent();
+      this->stream << "dim4 output_stride = {output_c_stride_aligned * " << inner_num << ", output_c_stride_aligned, " << index_num << ", 1};\n";
+      this->PrintIndent();
+      this->stream << "dim4 params_stride = {params_c_stride_aligned * " << inner_num << ", params_c_stride_aligned, " << select_num << ", 1};\n";
       this->PrintIndent();
       this->stream << "dim4 index_stride = {" << index_num << ", 1, 1, 1};\n";
       this->PrintIndent();
@@ -1617,33 +1640,35 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->PrintIndent();
         this->stream << "};\n";
       } else{
-        // split params
+        // split index and output (same strategy as select_num < inner_num branch)
         this->PrintIndent();
-        this->stream << "int inner_slice = (" << inner_num << " + core_num - 1) / core_num;\n";
+        this->stream << "int index_slice = (" << index_num << " + core_num - 1) / core_num;\n";
         this->PrintIndent();
-        this->stream << "int real_inner_slice = MIN(inner_slice, " << inner_num << " - core_idx * inner_slice);\n";
+        this->stream << "int allocated_core = (" << index_num << " + index_slice - 1) / index_slice;\n";
         this->PrintIndent();
-        this->stream << "if (inner_slice > 0) {\n";
+        this->stream << "int real_index_slice = MIN(index_slice, " << index_num << " - core_idx * index_slice);\n";
+        this->PrintIndent();
+        this->stream << "if (core_idx < allocated_core) {\n";
         int sid = this->BeginScope();
         this->PrintIndent();
-        this->stream << "dim4 params_subview_shape = {1, real_inner_slice, 1, " << select_num << "};\n";
+        this->stream << "dim4 index_subview_shape = {1, real_index_slice, 1, 1};\n";
         this->PrintIndent();
-        this->stream << "dim4 params_subview_stride = {real_inner_slice * " << select_num << ", " << select_num << ", " << select_num << ", 1};\n";
+        this->stream << "dim4 index_subview_stride = {real_index_slice, 1, 1, 1};\n";
         this->PrintIndent();
-        this->stream << "dim4 output_subview_shape = {1, real_inner_slice, 1, " << index_num << "};\n";
+        this->stream << "dim4 output_subview_shape = {1, " << inner_num << ", 1, real_index_slice};\n";
         this->PrintIndent();
-        this->stream << "dim4 output_subview_stride = {" << index_num << "* real_inner_slice" << ", " << index_num << ", " << index_num << ", 1};\n";
+        this->stream << "dim4 output_subview_stride = {" << inner_num << "* real_index_slice" << ", real_index_slice, real_index_slice, 1};\n";
         this->PrintIndent();
-        this->stream << "__ppl_tensor_info params_subview_shared = {.shape = params_subview_shape, .stride = params_subview_stride, "
-                    << ".addr = " << params_tensor << ".addr + core_idx * inner_slice * " << dtype_size << ", .dtype = " << dtype << ", "
-                    << ".mode = 2, .align_mode = 0, .size = real_inner_slice * " << select_num << ", .unsigned_flag = 0, .default_stride = true};\n";
+        this->stream << "__ppl_tensor_info index_subview_shared = {.shape = index_subview_shape, .stride = index_subview_stride, "
+                    << ".addr = " << index_tensor << ".addr + core_idx * index_slice * " << dtype1_size << ", .dtype = " << dtype1 << ", "
+                    << ".mode = 2, .align_mode = 0, .size = real_index_slice, .unsigned_flag = 0, .default_stride = true};\n";
         this->PrintIndent();
         this->stream << "__ppl_tensor_info output_subview_shared = {.shape = output_subview_shape, .stride = output_subview_stride, "
-                    << ".addr = " << output_tmp_tensor << ".addr + core_idx * inner_slice * " << dtype_size << ", .dtype = " << dtype << ", "
-                    << ".mode = 2, .align_mode = 0, .size = real_inner_slice * " << index_num << ", .unsigned_flag = 0, .default_stride = true};\n";
+                    << ".addr = " << output_tmp_tensor << ".addr + core_idx * " << inner_num << " * real_index_slice * " << dtype_size << ", .dtype = " << dtype << ", "
+                    << ".mode = 2, .align_mode = 0, .size = real_index_slice * " << inner_num << ", .unsigned_flag = 0, .default_stride = true};\n";
         this->PrintIndent();
-        // tpu_bdc_w_gather(output_tmp_buffer.addr, params_tmp_buffer.addr, index_subview_shared.addr, &output_tmp_buffer.shape, params_tmp_buffer.shape.w, DT_FP16, DT_UINT16);
-        this->stream << "tpu_bdc_w_gather(output_subview_shared.addr, "<< params_tmp_tensor <<".addr, "<< index_tensor <<".addr, &output_subview_shared.shape, params_shape.w, " << dtype << ", " << dtype1 << ");\n";
+        // Use complete params (not split), split only index and output
+        this->stream << "tpu_bdc_w_gather(output_subview_shared.addr, "<< params_tmp_tensor <<".addr, index_subview_shared.addr, &output_shape, params_shape.w, " << dtype << ", " << dtype1 << ");\n";
         this->EndScope(sid);
         this->PrintIndent();
         this->stream << "};\n";
