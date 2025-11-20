@@ -1140,8 +1140,15 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
 
       // 创建pad_val
       this->PrintIndent();
-      this->stream << "scalar_t pad_val = {."
-                   << (dtype_ == DataType::Float(16) ? "f16" : "f16")
+      std::string scalar_field;
+      if (dtype_ == DataType::Float(16)) {
+        scalar_field = "f16";
+      } else if (dtype_ == DataType::Float(32)) {
+        scalar_field = "f32";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        scalar_field = "bf16";
+      }
+      this->stream << "scalar_t pad_val = {." << scalar_field
                    << " = FP_NEG_MAX(" << dtype << ")};\n";
 
       // 判断是否需要填充 - 只有在宽度不是EU数的倍数时才需要填充
@@ -1154,8 +1161,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << input_tensor << ".shape.c, 1, align_w - " << input_tensor
                    << ".shape.w};\n";
       this->PrintIndent();
-      this->stream << "  int elem_size = "
-                   << (dtype_ == DataType::Float(16) ? "2" : "4") << ";\n";
+      int elem_size = (dtype_ == DataType::Float(16) || dtype_ == DataType::BFloat(16)) ? 2 : 4;
+      this->stream << "  int elem_size = " << elem_size << ";\n";
       this->PrintIndent();
       this->stream << "  int offset = " << input_tensor
                    << ".shape.w * elem_size;\n";
@@ -1291,6 +1298,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else if (dtype_ == DataType::Float(32)) {
         dtype = "DT_FP32";
         dtype_2 = "f32";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        dtype = "DT_BFP16";
+        dtype_2 = "bf16";
       } else if (dtype_ == DataType::Int(32)) {
         dtype = "DT_INT32";
         dtype_2 = "s32";
@@ -1328,6 +1338,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         elem_size = 2;
       } else if (dtype_ == DataType::Float(32)) {
         elem_size = 4;
+      } else if (dtype_ == DataType::BFloat(16)) {
+        elem_size = 2;
       } else if (dtype_ == DataType::Int(32)) {
         elem_size = 4;
       } else if (dtype_ == DataType::UInt(32)) {
@@ -1412,6 +1424,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         this->PrintIndent();
         this->stream
             << "scale = tpu_cast(scale, DT_FP16, DT_FP32, RM_HALF_TO_EVEN);\n";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        this->PrintIndent();
+        this->stream
+            << "scale = tpu_cast(scale, DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);\n";
       } else if (dtype_ == DataType::Int(32)) {
         this->PrintIndent();
         this->stream << "scale = tpu_cast(scale, DT_INT32, DT_FP32, "
