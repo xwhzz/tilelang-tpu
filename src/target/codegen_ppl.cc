@@ -880,6 +880,24 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         } else if (src_buffer->dtype == DataType::Float(32)) {
           dtype = "DT_FP32";
           bytes_size = 4;
+        } else if (src_buffer->dtype == DataType::UInt(32)){
+          dtype = "DT_UINT32";
+          bytes_size = 4;
+        }else if (src_buffer->dtype == DataType::Int(32)){
+          dtype = "DT_INT32";
+          bytes_size = 4;
+        } else if (src_buffer->dtype == DataType::UInt(8)){
+          dtype = "DT_UINT8";
+          bytes_size = 1;
+        } else if (src_buffer->dtype == DataType::Int(8)){
+          dtype = "DT_INT8";
+          bytes_size = 1;
+        } else if (src_buffer->dtype == DataType::UInt(16)){
+          dtype = "DT_UINT16";
+          bytes_size = 2;
+        } else if (src_buffer->dtype == DataType::Int(16)){
+          dtype = "DT_INT16";
+          bytes_size = 2;
         } else {
           LOG(FATAL) << "Unsupported dtype " << src_buffer->dtype;
         }
@@ -1106,6 +1124,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         dtype = "DT_FP16";
       } else if (dtype_ == DataType::Float(32)) {
         dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        dtype = "DT_BFP16";
       }
 
       this->PrintIndent();

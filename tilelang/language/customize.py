@@ -271,6 +271,7 @@ def ppl_reduce_max(inp, out, dim, clear=True):
     # 调用不含断言的宏函数
     return ppl_reduce_max_safe(inp, out, dim, clear)
 
+
 def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     outptr = out.access_ptr("w")
     even_inpptr1 = even_inp1.access_ptr("r")
