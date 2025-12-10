@@ -672,7 +672,11 @@ class TLTPUSourceWrapper(object):
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
         self.function_args = function_args
-        
+    
+    def write_kernel_c(self):
+        with open(f"{get_tpu_template_dir()}/kernel.c",'w') as f:
+            f.write(self.source)
+
     def create_kernel_header(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
         
@@ -758,6 +762,7 @@ class TLTPUSourceWrapper(object):
             kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
         
         kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
+        pure_kernel_call = f'  rst = {function_name}({", ".join(kernel_call_args)});'
         
         # 格式化内容
         formatted_content = template_content.format(
@@ -767,7 +772,8 @@ class TLTPUSourceWrapper(object):
             memcpy_s2d_statements="\n".join(memcpy_s2d_statements),
             memcpy_d2s_statements="\n".join(memcpy_d2s_statements),
             free_statements="\n".join(free_statements),
-            kernel_call=kernel_call
+            kernel_call=kernel_call,
+            pure_kernel_call=pure_kernel_call
         )
         
         if output_file is None:
@@ -780,6 +786,7 @@ class TLTPUSourceWrapper(object):
     def update_lib_code(self, code: str):
         # Update the library code with the given code string
         self.parse_func_args()
+        self.write_kernel_c()
         self.create_kernel_header()
         self.create_kernel_cpp()
         self.create_main_cpp()

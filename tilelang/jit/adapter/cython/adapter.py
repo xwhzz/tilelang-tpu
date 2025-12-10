@@ -4,7 +4,7 @@
 
 from ..base import BaseKernelAdapter
 import ctypes
-from typing import List, Optional, Union, Callable, Dict, Tuple, Any
+from typing import List, Optional, Union, Callable, Literal, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
@@ -156,6 +156,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: Optional[Dict[str, Any]] = None
 
+    # execution mode for tpu
+    mode: Literal["pcie", "cmodel"] = "pcie"
+
     def __init__(self,
                  params: List[KernelParam],
                  result_idx: List[int],
@@ -165,7 +168,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None):
+                 pass_configs: Optional[Dict[str, Any]] = None,
+                 mode: Literal["pcie", "cmodel"] = "pcie"):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -179,8 +183,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.result_idx = self._legalize_result_idx(result_idx)
         self.kernel_global_source = kernel_global_source
 
-        with open(f"{current}/../../../../src/tl_templates/tpu/kernel.c",'w') as f:
-            f.write(self.kernel_global_source)
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
@@ -195,8 +197,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.buffer_device_map = self._process_buffer_device()
 
         self.verbose = verbose
+        self.mode = mode
         self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target)
+        self.lib_generator = LibraryGenerator(self.target, self.mode)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)

@@ -107,6 +107,7 @@ class KernelCache:
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
+        mode: Literal["pcie", "cmodel"] = "pcie",
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -130,15 +131,16 @@ class KernelCache:
                 target_host=target_host,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                mode=mode,
             )
 
-        key = self._generate_key(
-            func=func,
-            out_idx=out_idx,
-            execution_backend=execution_backend,
-            args=args,
-            target=target,
-            target_host=target_host)
+        # key = self._generate_key(
+        #     func=func,
+        #     out_idx=out_idx,
+        #     execution_backend=execution_backend,
+        #     args=args,
+        #     target=target,
+        #     target_host=target_host)
         # with self._lock:
         #     # First check in-memory cache
         #     if key in self._memory_cache:
@@ -161,6 +163,7 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            mode=mode
         )
         # if execution_backend == "dlpack":
         #     self.logger.warning("DLPack backend does not support cache saving to disk.")
@@ -179,7 +182,7 @@ class KernelCache:
         #             self._save_kernel_to_disk(key, kernel, func)
 
         # Store in memory cache after compilation
-        self._memory_cache[key] = kernel
+        # self._memory_cache[key] = kernel
         return kernel
 
     def clear_cache(self):
