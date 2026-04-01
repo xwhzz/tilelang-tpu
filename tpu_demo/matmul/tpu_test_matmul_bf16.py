@@ -6,7 +6,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
-def matmul(M, N, K, block_M, block_N, block_K,dtype="bfloat16", accum_dtype="float32"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype="bfloat16", accum_dtype="bfloat16"):
 
     @T.prim_func
     def main_kernel_inner(
@@ -17,8 +17,8 @@ def matmul(M, N, K, block_M, block_N, block_K,dtype="bfloat16", accum_dtype="flo
       with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
-            C_shared_ori = T.alloc_shared((block_M, block_N), dtype)
+            C_shared = T.alloc_shared((block_M, block_N), "float32")
+            C_shared_ori = T.alloc_shared((block_M, block_N), accum_dtype)
 
             T.ppl_fill(C_shared, T.float32(0))
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):

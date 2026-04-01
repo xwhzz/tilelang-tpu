@@ -6,47 +6,43 @@ import tilelang
 import tilelang.language as T
 import torch
 
-def matmul(M, N, K, block_M, block_N, block_K,dtype="float16", accum_dtype="float32"):
+def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float16"):
 
     @T.prim_func
     def main_kernel_inner(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), accum_dtype),
+            C: T.Tensor((M, N), dtype),
     ):
       with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
+            C_shared = T.alloc_shared((block_M, block_N), "float32")
+            C_shared_ori = T.alloc_shared((block_M, block_N), accum_dtype)
 
             T.ppl_fill(C_shared, T.float32(0))
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
                 T.ppl_copy(A[by * block_M, k * block_K], A_shared)
                 T.ppl_copy(B[k * block_K, bx * block_N], B_shared)
                 T.ppl_gemm(A_shared, B_shared, C_shared)
-
-            T.ppl_copy(C_shared, C[by * block_M, bx * block_N])
+            T.ppl_copy(C_shared, C_shared_ori)
+            T.ppl_copy(C_shared_ori, C[by * block_M, bx * block_N])
     return main_kernel_inner
 
 
-M = 64
-N = 64
-K = 64
-block_M = 32
-block_N = 32    
-block_K = 32
-kernel = tilelang.compile(matmul(M,N,K,block_M=block_M,block_N=block_N,block_K=block_K), out_idx=-1, target="tpu")
 
-a = torch.randn(M, K).half()
-b = torch.randn(K, N).half()
-c = torch.zeros(M, N).float()
+kernel = tilelang.compile(matmul(64,64,64,32,32,32), out_idx=-1, target="tpu")
+
+a = torch.randn(64, 64).half()
+b = torch.randn(64, 64).half()
+c = torch.zeros(64, 64).half()
 
 res = kernel(a, b, c)
 print(res)
 print("output:")
 print(c)
 import torch.nn.functional as F
-ref = torch.matmul(a, b).float()
+ref = torch.matmul(a, b).half()
 print("ref")
 print(ref)
 diff = ref-c
