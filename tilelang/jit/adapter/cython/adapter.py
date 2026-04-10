@@ -229,7 +229,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 for i in self.result_idx:
                     tensor = torch.frombuffer(args1[i], dtype=args[i].dtype)
                     tensor = tensor.reshape(args[i].shape)              
-                    args_list[i][:,:]=tensor
+                    args_list[i][...]=tensor
 
                 return ret
             self.func = lambda_forward
