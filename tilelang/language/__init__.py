@@ -61,6 +61,7 @@ from .customize import (
     ppl_gemm,  # noqa: F401
     ppl_copy,  # noqa: F401
     ppl_fill,  # noqa: F401
+    ppl_clear,  # noqa: F401
     ppl_add,  # noqa: F401
     ppl_div,  # noqa: F401
     ppl_exp2,  # noqa: F401 # noqa: F401
@@ -71,6 +72,7 @@ from .customize import (
     ppl_subtract,  # noqa: F401
     ppl_rsqrt,  # noqa: F401
     ppl_add_C,  # noqa: F401
+    ppl_rope_add,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
 

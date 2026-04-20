@@ -91,3 +91,11 @@ tilelang/lib
 
 # cython
 tilelang/jit/adapter/cython/.cycache
+
+# TPU template compile intermediates
+/src/tl_templates/tpu/kernel.c
+/src/tl_templates/tpu/kernel.cpp
+/src/tl_templates/tpu/kernel.h
+/src/tl_templates/tpu/libkernel.so
+/src/tl_templates/tpu/main.cpp
+/src/tl_templates/tpu/main.so

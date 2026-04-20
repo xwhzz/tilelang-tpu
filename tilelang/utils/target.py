@@ -14,6 +14,7 @@ AVALIABLE_TARGETS = {
     "webgpu",
     "c",  # represent c source backend
     "llvm",
+    "tpu",
 }
 
 
@@ -68,11 +69,16 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
         is_cuda_available = check_cuda_availability()
         is_hip_available = check_hip_availability()
 
+        # Add TPU availability check
+        is_tpu_available = True  # Placeholder for TPU availability check
+
         # Determine the target based on availability
         if is_cuda_available:
             return_var = "cuda"
         elif is_hip_available:
             return_var = "hip"
+        elif is_tpu_available:
+            return_var = "tpu"
         else:
             raise ValueError("No CUDA or HIP available on this system.")
     else:

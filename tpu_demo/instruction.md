@@ -12,8 +12,8 @@ git apply tvm.patch
 Then, we need to follow instruction of the upstream repo to build src code:
 
 ```bash
-# we can run install_cuda.sh
-./install_cuda.sh
+# we can run install_tpu.sh
+./install_tpu.sh
 ```
 
 After these commands, we should correctly `import tilelang` in python.

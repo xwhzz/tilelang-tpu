@@ -98,6 +98,29 @@ def view(src: Buffer,
 
 
 def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
+    """Launch a TPU GEMM on local/shared tiles.
+
+    Args:
+        A: Left-hand input tile.
+        B: Right-hand input tile.
+        C: Output/accumulation tile with shape `(M, N)`.
+        transpose_A: Whether `A` should be treated as transposed.
+            This option is not recommended in current TPU usage.
+        transpose_B: Whether `B` should be treated as transposed.
+
+    Returns:
+        PrimExpr: Handle to the emitted GEMM extern call.
+
+    Example:
+        `T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True)`
+
+    Notes:
+        `K` is inferred from `A` and `B`, and must match.
+        In current TPU usage, `C` is typically initialized first, then reused
+        as the accumulation tile across one or more `ppl_gemm` calls.
+        `transpose_A` is not recommended in the current TPU path; prefer using
+        `transpose_B=True` when a transpose form is needed.
+    """
     Aptr = A.access_ptr("r")
     Bptr = B.access_ptr("r")
     Cptr = C.access_ptr("rw")
@@ -113,6 +136,27 @@ def ppl_copy(
     src,
     dst,
 ):
+    """Copy a tile/region between global and local memory, with optional cast.
+
+    Args:
+        src: Source buffer, `BufferRegion`, or `BufferLoad`.
+        dst: Destination buffer, `BufferRegion`, or `BufferLoad`.
+
+    Returns:
+        PrimExpr: Handle to the emitted copy extern call.
+
+    Example:
+        `T.ppl_copy(X[by * block_M, 0], X_shared)`
+        `T.ppl_copy(A_shared_fp32, A_shared)`
+
+    Notes:
+        This op is commonly used for global-to-shared loads, shared-to-global
+        stores, and shared-to-shared copies between temporary tiles.
+        When source and destination dtypes differ, this op can also be used as
+        a convenient copy-and-convert step.
+        The most common TPU usage is copying 2D tiles or simple row/column
+        slices.
+    """
 
     def get_extent(data):
         if isinstance(data, Buffer):
@@ -148,11 +192,52 @@ def ppl_copy(
 
 
 def ppl_fill(buffer, value):
+    """Fill a local/shared tile with a scalar constant.
+
+    Args:
+        buffer: Destination tile to be written.
+        value: Scalar literal to broadcast to every element.
+
+    Returns:
+        PrimExpr: Handle to the emitted fill extern call.
+
+    Example:
+        `T.ppl_fill(C_shared, T.float32(0))`
+        `T.ppl_fill(scores_max, -T.infinity(accum_dtype))`
+
+    Notes:
+        This is typically used to initialize accumulation buffers, masks,
+        or temporary outputs before later elementwise or reduction ops.
+        The common supported destination dtypes are `float16`, `bfloat16`,
+        and `float32`.
+    """
     buffer = buffer.access_ptr("w")
     return T.call_extern("handle", "ppl.fill", buffer, value)
 
 
+def ppl_clear(buffer):
+    return T.ppl_fill(buffer, T.float32(0))
+
+
 def ppl_subtract(out, inp1, inp2):
+    """Compute elementwise subtraction `out = inp1 - inp2`.
+
+    Args:
+        out: Output tile.
+        inp1: Left-hand input tile.
+        inp2: Right-hand input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted subtraction extern call.
+
+    Example:
+        `T.ppl_subtract(scores_scale, scores_max_prev, scores_max)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+        A limited broadcast-style usage is also supported in common cases when
+        the second input has shape `(M, 1)`.
+    """
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -160,12 +245,49 @@ def ppl_subtract(out, inp1, inp2):
 
 
 def ppl_mul_C(out, inp1, value):
+    """Compute elementwise scalar multiply `out = inp1 * value`.
+
+    Args:
+        out: Output tile.
+        inp1: Input tile.
+        value: Scalar multiplier.
+
+    Returns:
+        PrimExpr: Handle to the emitted multiply-by-constant extern call.
+
+    Example:
+        `T.ppl_mul_C(scores_scale, scores_scale, scale)`
+        `T.ppl_mul_C(x_neg, in_x, T.float32(-1.0))`
+
+    Notes:
+        This is commonly used for scaling, sign flip, and normalization-style
+        updates on a local tile.
+    """
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     return T.call_extern("handle", "ppl.mul_C", outptr, inpptr1, value)
 
 
 def ppl_mul(out, inp1, inp2):
+    """Compute elementwise multiplication `out = inp1 * inp2`.
+
+    Args:
+        out: Output tile.
+        inp1: Left-hand input tile.
+        inp2: Right-hand input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted multiply extern call.
+
+    Example:
+        `T.ppl_mul(A_pow2, A_shared, A_shared)`
+        `T.ppl_mul(out, right, x_neg_exp_1_div)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+        A limited broadcast-style usage is also supported in common cases when
+        the second input has shape `(M, 1)`.
+    """
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -174,6 +296,25 @@ def ppl_mul(out, inp1, inp2):
 
 @T.macro
 def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
+    """Compute `exp(out)` in place.
+
+    Args:
+        out: Input/output tile. The result overwrites this buffer.
+        work0: Scratch tile with the same shape as `out`.
+        work1: Scratch tile with the same shape as `out`.
+        coeff: FP32 coefficient buffer, typically shaped like `(64, 32)`.
+        table: FP32 lookup-table buffer, typically shaped like `(64, 192)`.
+
+    Example:
+        `T.ppl_exp2(scores_scale, work0, work1, coeff, table)`
+
+    Notes:
+        Despite the name `ppl_exp2`, this op computes natural exponential
+        `exp(x)`, not `2^x`.
+        `out`, `work0`, `work1`, `coeff`, and `table` should all be allocated
+        by the caller before invoking this macro.
+        The current usage requires FP32 buffers.
+    """
     buffer = out.access_ptr("rw")
     work0ptr = work0.access_ptr("rw")
     work1ptr = work1.access_ptr("rw")
@@ -196,18 +337,71 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
 
 
 def ppl_rsqrt(out, inp):
+    """Compute reciprocal square root `out = rsqrt(inp)`.
+
+    Args:
+        out: Output tile.
+        inp: Input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted rsqrt extern call.
+
+    Example:
+        `T.ppl_rsqrt(A_powsum, A_powsum)`
+
+    Notes:
+        The current usage requires both `out` and `inp` to be FP32.
+        For FP16/BF16 workflows, first copy into an FP32 temporary buffer,
+        apply `ppl_rsqrt`, then copy back if needed.
+    """
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("w")
     return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
 
 
 def ppl_add_C(out, inp1, value):
+    """Compute elementwise scalar add `out = inp1 + value`.
+
+    Args:
+        out: Output tile.
+        inp1: Input tile.
+        value: Scalar bias to add.
+
+    Returns:
+        PrimExpr: Handle to the emitted add-by-constant extern call.
+
+    Example:
+        `T.ppl_add_C(A_powsum, A_powsum, T.float32(1e-12))`
+
+    Notes:
+        This is commonly used to add epsilon, bias, or other scalar offsets to
+        a local tile.
+    """
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     return T.call_extern("handle", "ppl.add_C", outptr, inpptr1, value)
 
 
 def ppl_add(out, inp1, inp2):
+    """Compute elementwise addition `out = inp1 + inp2`.
+
+    Args:
+        out: Output tile.
+        inp1: Left-hand input tile.
+        inp2: Right-hand input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted add extern call.
+
+    Example:
+        `T.ppl_add(logsum, logsum, scores_sum)`
+        `T.ppl_add(x_neg_exp_1, x_neg_exp, ones)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+        A limited broadcast-style usage is also supported in common cases when
+        the second input has shape `(M, 1)`.
+    """
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -215,6 +409,25 @@ def ppl_add(out, inp1, inp2):
 
 
 def ppl_div(out, inp1, inp2):
+    """Compute elementwise division `out = inp1 / inp2`.
+
+    Args:
+        out: Output tile.
+        inp1: Numerator tile.
+        inp2: Denominator tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted division extern call.
+
+    Example:
+        `T.ppl_div(acc_o, acc_o, logsum)`
+        `T.ppl_div(x_neg_exp_1_div, x, x_neg_exp_1)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+        A limited broadcast-style usage is also supported in common cases when
+        the second input has shape `(M, 1)`.
+    """
     outptr = out.access_ptr("w")
     inpptr1 = inp1.access_ptr("r")
     inpptr2 = inp2.access_ptr("r")
@@ -223,6 +436,10 @@ def ppl_div(out, inp1, inp2):
 
 @T.macro
 def ppl_reduce_sum_safe(inp, out, dim):
+    """Internal macro backing `ppl_reduce_sum`.
+
+    Prefer calling `ppl_reduce_sum(...)` directly in user kernels.
+    """
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
     with T.block("reduce_sum"):
@@ -238,12 +455,35 @@ def ppl_reduce_sum_safe(inp, out, dim):
 
 
 def ppl_reduce_sum(inp, out, dim):
+    """Reduce a 2D tile along its second dimension with summation.
+
+    Args:
+        inp: Input tile, typically shaped `(M, N)`.
+        out: Output tile, typically shaped `(M, 1)`.
+        dim: Reduction axis. The current TPU path only supports `dim=1`.
+
+    Returns:
+        PrimExpr: Handle to the emitted reduction macro call.
+
+    Example:
+        `T.ppl_reduce_sum(acc_s, scores_sum, dim=1)`
+        `T.ppl_reduce_sum(X_shared, Y_shared, dim=1)`
+
+    Notes:
+        This op is intended for 2D tiles and currently only supports
+        reduction along `dim=1`.
+        The usual output shape is `(inp.shape[0], 1)`.
+    """
     assert dim == 1, "Only dim=1 is supported for reduction"
     return ppl_reduce_sum_safe(inp, out, dim)
 
 
 @T.macro
 def ppl_reduce_max_safe(inp, out, dim, clear=True):
+    """Internal macro backing `ppl_reduce_max`.
+
+    Prefer calling `ppl_reduce_max(...)` directly in user kernels.
+    """
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
     if clear:
@@ -266,7 +506,60 @@ def ppl_reduce_max_safe(inp, out, dim, clear=True):
 
 
 def ppl_reduce_max(inp, out, dim, clear=True):
+    """Reduce a 2D tile along its second dimension with max.
+
+    Args:
+        inp: Input tile, typically shaped `(M, N)`.
+        out: Output tile, typically shaped `(M, 1)`.
+        dim: Reduction axis. The current TPU path only supports `dim=1`.
+        clear: Whether to initialize `out` to `-inf` before reduction.
+            Set this to `False` when you intentionally accumulate across tiles.
+
+    Returns:
+        PrimExpr: Handle to the emitted reduction macro call.
+
+    Example:
+        `T.ppl_reduce_max(acc_s, scores_max, dim=1, clear=False)`
+        `T.ppl_reduce_max(X_shared, Y_shared, dim=1, clear=True)`
+
+    Notes:
+        This op is intended for 2D tiles and currently only supports
+        reduction along `dim=1`.
+        The usual output shape is `(inp.shape[0], 1)`.
+        Set `clear=False` only when you intentionally want to keep and update
+        the previous contents of `out`.
+    """
     # 在函数外部进行检查
     assert dim == 1, "Only dim=1 is supported"
     # 调用不含断言的宏函数
     return ppl_reduce_max_safe(inp, out, dim, clear)
+
+
+def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
+    """Assemble interleaved RoPE output from precomputed even/odd terms.
+
+    Args:
+        out: Output tile. Its last dimension must be even.
+        even_inp1: Tensor contributing the even-lane base term.
+        even_inp2: Tensor contributing the even-lane cross term.
+        odd_inp1: Tensor contributing the odd-lane base term.
+        odd_inp2: Tensor contributing the odd-lane cross term.
+
+    Returns:
+        PrimExpr: Handle to the emitted RoPE extern call.
+
+    Example:
+        `T.ppl_rope_add(out, x_cos, x_neg_sin, x_cos, x_sin)`
+
+    Notes:
+        This helper is intended for the common RoPE pattern where the caller
+        has already prepared the even/odd terms, such as `x * cos(theta)`,
+        `x * sin(theta)`, and `-x * sin(theta)`.
+        The last dimension of `out` should be even.
+    """
+    outptr = out.access_ptr("w")
+    even_inpptr1 = even_inp1.access_ptr("r")
+    even_inpptr2 = even_inp2.access_ptr("r")
+    odd_inpptr1 = odd_inp1.access_ptr("r")
+    odd_inpptr2 = odd_inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.rope_add", outptr, even_inpptr1, even_inpptr2, odd_inpptr1, odd_inpptr2)

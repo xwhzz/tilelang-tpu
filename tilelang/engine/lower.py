@@ -229,21 +229,22 @@ def lower(
 
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)
-    print(mod)
-    device_mod = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod,)  # target)
-    print(device_mod)
-    return device_mod
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 
-    codegen_mod = device_codegen(
-        device_mod, target) if enable_device_compile else device_codegen_without_compile(
-            device_mod, target)
+    codegen_mod = tvm._ffi.get_global_func("target.build.tilelang_ppl")(mod,)  # target)
+    # return device_mod
+    # host_mod = tir.transform.Filter(_is_host_call)(mod)
+    # device_mod = tir.transform.Filter(_is_device_call)(mod)
 
-    if enable_host_codegen:
-        host_mod = host_codegen(host_mod, target_host)
-        host_mod.import_module(codegen_mod)
-        return CompiledArtifact(
-            host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
+    # codegen_mod = device_codegen(
+    #     device_mod, target) if enable_device_compile else device_codegen_without_compile(
+    #         device_mod, target)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())
+    # if enable_host_codegen:
+    #     host_mod = host_codegen(host_mod, target_host)
+    #     host_mod.import_module(codegen_mod)
+    #     return CompiledArtifact(
+    #         host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
+
+    return CompiledArtifact(host_mod, device_mod, params, codegen_mod)

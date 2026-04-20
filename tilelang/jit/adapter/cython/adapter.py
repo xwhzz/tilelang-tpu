@@ -4,7 +4,7 @@
 
 from ..base import BaseKernelAdapter
 import ctypes
-from typing import List, Optional, Union, Callable, Dict, Tuple, Any
+from typing import List, Optional, Union, Callable, Literal, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
@@ -12,7 +12,7 @@ from tvm import tir
 from tvm.relay import TensorType
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
-from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
+from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target, is_tpu_target
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
@@ -24,9 +24,10 @@ import hashlib
 import os
 from pathlib import Path
 import logging
-
+import numpy as np
 logger = logging.getLogger(__name__)
 
+current = os.path.dirname(os.path.abspath(__file__))
 
 def get_cython_compiler() -> Optional[str]:
     """Return the path to the Cython compiler.
@@ -155,6 +156,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: Optional[Dict[str, Any]] = None
 
+    # execution mode for tpu
+    mode: Literal["pcie", "cmodel"] = "pcie"
+
     def __init__(self,
                  params: List[KernelParam],
                  result_idx: List[int],
@@ -164,7 +168,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None):
+                 pass_configs: Optional[Dict[str, Any]] = None,
+                 mode: Literal["pcie", "cmodel"] = "pcie"):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -192,32 +197,56 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.buffer_device_map = self._process_buffer_device()
 
         self.verbose = verbose
+        self.mode = mode
         self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target)
+        self.lib_generator = LibraryGenerator(self.target, self.mode)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
+        self.wrapper.assign_output_indices(self.result_idx)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
+        if is_tpu_target(self.target):
+            # TODO: 暂时使用ctypes，后续考虑更高效cython
+            def lambda_forward(*args):
+                # for i, arg in enumerate(args):
+                #     print(f"参数 {i}: shape = {arg.shape}, dtype = {arg.dtype}")
+                args1 = [bytes(arg.cpu().untyped_storage()) for arg in args]
+                argc = len(args)+1
+                
+                args2= [ctypes.c_char_p(arg) for arg in args1]
+                args2 = [b"./main"]+args2
+                argv = (ctypes.c_char_p * argc)()
+                argv[:] = args2
+                argc = len(argv)
+                ret=self.lib.main(argc, argv)
+                args_list = list(args)
+                for i in self.result_idx:
+                    tensor = torch.frombuffer(args1[i], dtype=args[i].dtype)
+                    tensor = tensor.reshape(args[i].shape)              
+                    args_list[i][...]=tensor
 
-        self.lib.get_last_error.restype = ctypes.c_char_p
-        result = self.lib.init()
-        if result != 0:
-            error_msg = self.lib.get_last_error().decode('utf-8')
-            raise RuntimeError(f"Initialization failed: {error_msg}")
+                return ret
+            self.func = lambda_forward
+        else:
+            self.lib.get_last_error.restype = ctypes.c_char_p
+            result = self.lib.init()
+            if result != 0:
+                error_msg = self.lib.get_last_error().decode('utf-8')
+                raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
-        self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
-        self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
-        self.cython_wrapper.set_static_shape_map(self.static_shape_map)
-        self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
-        self.cython_wrapper.set_ptr_map(self.ptr_map)
-        self._post_init()
+            self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
+            self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
+            self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
+            self.cython_wrapper.set_static_shape_map(self.static_shape_map)
+            self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
+            self.cython_wrapper.set_ptr_map(self.ptr_map)
+            self._post_init()
 
     @classmethod
     def from_database(cls,
@@ -352,7 +381,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         device = None
         if is_cuda_target(self.target) or is_hip_target(self.target):
             device = torch.device("cuda")
-        elif is_cpu_target(self.target):
+        elif is_cpu_target(self.target) or is_tpu_target(self.target):
             device = torch.device("cpu")
         else:
             raise ValueError(f"Unsupported target: {self.target}")

@@ -63,7 +63,13 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop()(mod)
-    mod = tir.transform.StorageRewrite()(mod)
+    # StorageRewrite assumes FlattenBuffer/StorageFlatten-style IR, where
+    # Allocate/DeclBuffer pairs have already been normalized. The TPU path
+    # intentionally keeps multi-dimensional buffers for downstream region-based
+    # codegen, so running StorageRewrite after LowerOpaqueBlock introduces
+    # duplicate declarations for the same buffer var.
+    if target.kind.name != "tpu":
+        mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)

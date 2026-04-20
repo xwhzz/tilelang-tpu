@@ -46,6 +46,7 @@ class JITKernel(object):
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
         from_database: bool = False,
+        mode: Literal["pcie", "cmodel"] = "pcie",
     ):
         """
         Initializes a TorchFunction instance.
@@ -80,6 +81,7 @@ class JITKernel(object):
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs
+        self.mode = mode
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
@@ -95,6 +97,12 @@ class JITKernel(object):
             "ctypes",
             "cython",
         ], f"Invalid execution backend. {execution_backend}"
+
+        assert mode in [
+            "pcie",
+            "cmodel",
+        ], f"Invalid execution mode. {mode}"
+
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
 
@@ -124,6 +132,7 @@ class JITKernel(object):
         out_idx: Union[List[int], int],
         execution_backend: Literal["dlpack", "ctypes", "cython"],
         pass_configs: Optional[Dict[str, Any]] = None,
+        mode: Literal["pcie", "cmodel"] = "pcie",
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -136,6 +145,7 @@ class JITKernel(object):
             target_host=target_host,
             pass_configs=pass_configs,
             from_database=True,
+            mode=mode,
         )
 
         instance.adapter = instance._create_adapter_from_database(
@@ -189,6 +199,8 @@ class JITKernel(object):
         execution_backend = self.execution_backend
         pass_configs = self.pass_configs
 
+        mode = self.mode
+
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
@@ -233,6 +245,7 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                mode=mode,
             )
         else:
             # Handle invalid backend.
