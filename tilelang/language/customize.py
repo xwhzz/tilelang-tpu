@@ -215,6 +215,10 @@ def ppl_fill(buffer, value):
     return T.call_extern("handle", "ppl.fill", buffer, value)
 
 
+def ppl_clear(buffer):
+    return T.ppl_fill(buffer, T.float32(0))
+
+
 def ppl_subtract(out, inp1, inp2):
     """Compute elementwise subtraction `out = inp1 - inp2`.
 
