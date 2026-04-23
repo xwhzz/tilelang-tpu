@@ -313,3 +313,210 @@ def compile_ppl_kernel(pl_path, arg_specs, result_idx):
     forward = _make_forward(main_so, result_idx)
 
     return forward
+
+
+# ── .pl template generation ───────────────────────────────────────────────────
+
+_PPL_TYPE = {"float32": "fp32", "bfloat16": "bf16", "float16": "fp16"}
+
+_SWIGLU_TEMPLATE = '''\
+#include "ppl.h"
+#include "ppl_wrapper_func.h"
+
+using namespace ppl;
+
+__KERNEL__ void main_kernel({ppl_t} *ptr_in, {ppl_t} *ptr_right, {ppl_t} *ptr_out) {{
+  int C = {C};
+  int W = {W};
+  int block_w = 16;
+  int block_c = 64;
+
+  dim4 global_shape = {{1, C, 1, W}};
+  auto g_in = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_in);
+  auto g_right = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_right);
+  auto g_out = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_out);
+
+  dim4 block_shape = {{1, block_c, 1, block_w}};
+
+  for (int idx_c = 0; idx_c < C; idx_c += block_c) {{
+    int c = min(block_c, C - idx_c);
+    for (int idx_w = 0; idx_w < W; idx_w += block_w) {{
+      ppl::enable_pipeline();
+      int w = min(block_w, W - idx_w);
+
+      dim4 in_shape = {{1, c, 1, w}};
+      dim4 in_offset = {{0, idx_c, 0, idx_w}};
+{load_cast_block}
+      auto x_neg = make_tensor<fp32>(block_shape, in_shape);
+      tiu::fmul(x_neg, in, -1.0);
+      auto x_neg_exp = make_tensor<fp32>(block_shape, in_shape);
+      exp_no_overflow(x_neg_exp, x_neg, &block_shape, &in_shape);
+      auto x_neg_exp_1 = make_tensor<fp32>(block_shape, in_shape);
+      tiu::fadd(x_neg_exp_1, x_neg_exp, 1.0);
+      auto x_neg_exp_1_div = make_tensor<fp32>(block_shape, in_shape);
+      tiu::fdiv(x_neg_exp_1_div, in, x_neg_exp_1, 3);
+      auto out_fp32 = make_tensor<fp32>(block_shape, in_shape);
+      tiu::fmul(out_fp32, x_neg_exp_1_div, right);
+{store_cast_block}
+    }}
+  }}
+}}
+'''
+
+_ROPE_TEMPLATE = '''\
+#include "ppl.h"
+#include "ppl_wrapper_func.h"
+
+using namespace ppl;
+
+__KERNEL__ void main_kernel({ppl_t} *ptr_in, {ppl_t} *ptr_cos, {ppl_t} *ptr_sin,
+                            {ppl_t} *ptr_out) {{
+  int C = {C};
+  int W = {W};
+  int block_w = 16;
+  int block_c = 64;
+
+  dim4 global_shape = {{1, C, 1, W}};
+  auto g_in = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_in);
+  auto g_out = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_out);
+  auto g_cos = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_cos);
+  auto g_sin = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_sin);
+
+  dim4 block_shape = {{1, block_c, 1, block_w}};
+
+  for (int idx_c = 0; idx_c < C; idx_c += block_c) {{
+    int c = min(block_c, C - idx_c);
+    for (int idx_w = 0; idx_w < W; idx_w += block_w) {{
+      ppl::enable_pipeline();
+      int w = min(block_w, W - idx_w);
+
+      dim4 in_shape = {{1, c, 1, w}};
+      auto in = make_tensor<{ppl_t}>(block_shape, in_shape);
+      auto in_cos = make_tensor<{ppl_t}>(block_shape, in_shape);
+      auto in_sin = make_tensor<{ppl_t}>(block_shape, in_shape);
+
+      dim4 in_offset = {{0, idx_c, 0, idx_w}};
+      dma::load(in, g_in.sub_view(in_shape, in_offset));
+      dma::load(in_cos, g_cos.sub_view(in_shape, in_offset));
+      dma::load(in_sin, g_sin.sub_view(in_shape, in_offset));
+
+      auto x_cos = make_tensor<{ppl_t}>(block_shape, in_shape);
+      tiu::fmul(x_cos, in, in_cos);
+      auto x_sin = make_tensor<{ppl_t}>(block_shape, in_shape);
+      tiu::fmul(x_sin, in, in_sin);
+      auto x_neg = make_tensor<{ppl_t}>(block_shape, in_shape);
+      tiu::fmul(x_neg, in, -1.0);
+      auto x_neg_sin = make_tensor<{ppl_t}>(block_shape, in_shape);
+      tiu::fmul(x_neg_sin, x_neg, in_sin);
+
+      auto out = make_tensor<{ppl_t}>(block_shape, in_shape);
+      dim4 half_shape = {{1, c, 1, w / 2}};
+      dim4 half_stride;
+      get_stride(&half_stride, &in_shape, TPU_ALIGN, get_eu_num<{ppl_t}>());
+      half_stride.w = 2;
+      dim4 offset = {{0, 0, 0, 1}};
+      auto x_neg_sin_half =
+          x_neg_sin.sub_view(half_shape, offset).view(half_shape, half_stride);
+      tiu::fadd(out.view(half_shape, half_stride),
+                x_cos.view(half_shape, half_stride), x_neg_sin_half);
+      tiu::fadd(
+          out.sub_view(half_shape, offset).view(half_shape, half_stride),
+          x_cos.sub_view(half_shape, offset).view(half_shape, half_stride),
+          x_sin.view(half_shape, half_stride));
+      dma::store(g_out.sub_view(in_shape, in_offset), out);
+    }}
+  }}
+}}
+'''
+
+_ADD_TEMPLATE = '''\
+#include "ppl.h"
+
+using namespace ppl;
+
+__KERNEL__ void main_kernel({ppl_t} *ptr_a, {ppl_t} *ptr_b, {ppl_t} *ptr_c) {{
+  int C = {M};
+  int W = {N};
+  int block_c = 64;
+  int block_w = 16;
+
+  dim4 global_shape = {{1, C, 1, W}};
+  auto g_a = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_a);
+  auto g_b = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_b);
+  auto g_c = gtensor<{ppl_t}>(global_shape, GLOBAL, ptr_c);
+
+  dim4 block_shape = {{1, block_c, 1, block_w}};
+
+  for (int idx_c = 0; idx_c < C; idx_c += block_c) {{
+    int c = min(block_c, C - idx_c);
+    for (int idx_w = 0; idx_w < W; idx_w += block_w) {{
+      ppl::enable_pipeline();
+      int w = min(block_w, W - idx_w);
+      dim4 in_shape = {{1, c, 1, w}};
+      auto a = make_tensor<{ppl_t}>(block_shape, in_shape);
+      auto b = make_tensor<{ppl_t}>(block_shape, in_shape);
+      auto out = make_tensor<{ppl_t}>(block_shape, in_shape);
+      dim4 in_offset = {{0, idx_c, 0, idx_w}};
+      dma::load(a, g_a.sub_view(in_shape, in_offset));
+      dma::load(b, g_b.sub_view(in_shape, in_offset));
+      tiu::fadd(out, a, b);
+      dma::store(g_c.sub_view(in_shape, in_offset), out);
+    }}
+  }}
+}}
+'''
+
+
+def generate_pl(op, dtype, shape):
+    """Generate a .pl file for the given op/dtype/shape and return its path."""
+    ppl_t = _PPL_TYPE[dtype]
+
+    if op == "swiglu":
+        C, W = shape["C"], shape["W"]
+        if dtype == "float32":
+            load_cast = (
+                "      auto in = make_tensor<fp32>(block_shape, in_shape);\n"
+                "      auto right = make_tensor<fp32>(block_shape, in_shape);\n"
+                "      dma::load(in, g_in.sub_view(in_shape, in_offset));\n"
+                "      dma::load(right, g_right.sub_view(in_shape, in_offset));\n"
+            )
+            store_cast = (
+                "      dma::store(g_out.sub_view(in_shape, in_offset), out_fp32);\n"
+            )
+        else:
+            load_cast = (
+                f"      auto in_{ppl_t} = make_tensor<{ppl_t}>(block_shape, in_shape);\n"
+                f"      auto right_{ppl_t} = make_tensor<{ppl_t}>(block_shape, in_shape);\n"
+                f"      dma::load(in_{ppl_t}, g_in.sub_view(in_shape, in_offset));\n"
+                f"      dma::load(right_{ppl_t}, g_right.sub_view(in_shape, in_offset));\n"
+                f"      auto in = make_tensor<fp32>(block_shape, in_shape);\n"
+                f"      auto right = make_tensor<fp32>(block_shape, in_shape);\n"
+                f"      tiu::cast(in, in_{ppl_t});\n"
+                f"      tiu::cast(right, right_{ppl_t});\n"
+            )
+            store_cast = (
+                f"      auto out_{ppl_t} = make_tensor<{ppl_t}>(block_shape, in_shape);\n"
+                f"      tiu::cast(out_{ppl_t}, out_fp32);\n"
+                f"      dma::store(g_out.sub_view(in_shape, in_offset), out_{ppl_t});\n"
+            )
+        src = _SWIGLU_TEMPLATE.format(
+            ppl_t=ppl_t, C=C, W=W,
+            load_cast_block=load_cast, store_cast_block=store_cast,
+        )
+    elif op == "rope":
+        src = _ROPE_TEMPLATE.format(ppl_t=ppl_t, C=shape["C"], W=shape["W"])
+    elif op == "add":
+        src = _ADD_TEMPLATE.format(ppl_t=ppl_t, M=shape["M"], N=shape["N"])
+    else:
+        raise ValueError(f"Unknown op: {op}")
+
+    out_dir = tempfile.mkdtemp(prefix="ppl_pl_")
+    ds = {"float32": "fp32", "bfloat16": "bf16", "float16": "fp16"}[dtype]
+    if op in ("swiglu", "rope"):
+        fname = f"{op}_{ds}_{shape['C']}x{shape['W']}.pl"
+    else:
+        fname = f"{op}_{ds}_{shape['M']}x{shape['N']}.pl"
+    pl_path = os.path.join(out_dir, fname)
+    with open(pl_path, "w") as f:
+        f.write(src)
+    return pl_path
