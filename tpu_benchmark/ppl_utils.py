@@ -1,0 +1,314 @@
+"""
+Utility to compile a .pl file via ppl-compile, build it into a shared library
+using tilelang's TPU host templates, and return a callable forward function.
+
+Usage:
+    from ppl_utils import compile_ppl_kernel
+    forward = compile_ppl_kernel("swiglu/pl/swiglu_fp32_64x64.pl", num_args=3, result_idx=[2])
+    forward(a, b, c)  # torch tensors
+"""
+
+import ctypes
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+
+import torch
+
+
+# ── env helpers ───────────────────────────────────────────────────────────────
+
+def get_ppl_project_root():
+    root = os.environ.get("PPL_PROJECT_ROOT", None)
+    if root is None:
+        raise EnvironmentError(
+            "PPL_PROJECT_ROOT is not set. "
+            "Please export PPL_PROJECT_ROOT=/path/to/ppl_v1.4.195-..."
+        )
+    return root
+
+
+def _get_tpu_template_dir():
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(here, "../src/tl_templates/tpu"))
+
+
+# ── Step 1: ppl-compile .pl → rewritten kernel.c ─────────────────────────────
+
+def compile_pl(pl_path, chip="bm1690", opt_level=2):
+    pl_path = os.path.abspath(pl_path)
+    if not os.path.isfile(pl_path):
+        raise FileNotFoundError(f"PL file not found: {pl_path}")
+
+    ppl_root = get_ppl_project_root()
+    ppl_compile = os.path.join(ppl_root, "bin", "ppl-compile")
+
+    out_dir = tempfile.mkdtemp(prefix="ppl_build_")
+    cmd = [
+        ppl_compile, pl_path, "--function=*",
+        "-chip", chip, f"-O{opt_level}", "-o", out_dir,
+    ]
+    env = os.environ.copy()
+    env["PPL_PROJECT_ROOT"] = ppl_root
+    env["PATH"] = os.path.join(ppl_root, "bin") + ":" + env.get("PATH", "")
+
+    ret = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if ret.returncode != 0:
+        raise RuntimeError(f"ppl-compile failed:\n{ret.stdout}\n{ret.stderr}")
+
+    basename = os.path.splitext(os.path.basename(pl_path))[0]
+    device_c = os.path.join(out_dir, "device", basename + ".c")
+    if not os.path.isfile(device_c):
+        device_dir = os.path.join(out_dir, "device")
+        candidates = os.listdir(device_dir) if os.path.isdir(device_dir) else []
+        raise FileNotFoundError(
+            f"Expected {device_c}, found: {candidates}")
+
+    return _rewrite_kernel_c(device_c)
+
+
+def _rewrite_kernel_c(device_c_path):
+    with open(device_c_path, "r") as f:
+        src = f.read()
+
+    m = re.search(r"TPUKERNEL_FUNC_REGISTER\((\w+)\)", src)
+    if not m:
+        raise ValueError("Cannot find TPUKERNEL_FUNC_REGISTER in generated kernel.c")
+    orig_name = m.group(1)
+
+    if orig_name != "main_kernel":
+        src = src.replace(orig_name + "_inner", "main_kernel_inner")
+        src = src.replace(f"tpu_kernel_api_{orig_name}_t",
+                          "tpu_kernel_api_main_inner_args_t")
+        src = src.replace(f"TPUKERNEL_FUNC_REGISTER({orig_name})",
+                          "TPUKERNEL_FUNC_REGISTER(main_kernel)")
+        src = src.replace(f"int {orig_name}(const void",
+                          "int main_kernel(const void")
+        src = src.replace(f"_tensor__{orig_name}_t", "__ppl_tensor_info")
+    else:
+        src = src.replace("tpu_kernel_api_main_kernel_t",
+                          "tpu_kernel_api_main_inner_args_t")
+        src = src.replace("_tensor__main_kernel_t", "__ppl_tensor_info")
+
+    out_path = os.path.join(os.path.dirname(device_c_path), "kernel_rewritten.c")
+    with open(out_path, "w") as f:
+        f.write(src)
+    return out_path
+
+
+# ── Step 2: generate host template files ──────────────────────────────────────
+
+def _generate_templates(build_dir, num_args, dtype_map, shapes, result_idx):
+    """Generate kernel.h, kernel.cpp, main.cpp into build_dir using tilelang's
+    template format but independent of tilelang.compile.
+
+    Args:
+        build_dir: where to write the generated files
+        num_args: number of tensor arguments
+        dtype_map: list of PPL dtype strings, e.g. ["DT_FP32", "DT_FP32", "DT_FP32"]
+        shapes: list of (rows, cols) tuples for each arg
+        result_idx: list of output arg indices (for D2S copy)
+    """
+    tpl_dir = _get_tpu_template_dir()
+    param_names = [f"ptr_v{i+1}" for i in range(num_args)]
+
+    # kernel.h
+    with open(os.path.join(tpl_dir, "kernel_template.h")) as f:
+        h_tpl = f.read()
+    h_content = h_tpl.format(
+        struct_members="\n  ".join(f"unsigned long long {n};" for n in param_names),
+        function_name="main_kernel",
+        func_params=", ".join(f"unsigned long long {n}" for n in param_names),
+        struct_params=", ".join(f"unsigned long long {n}" for n in param_names),
+    )
+    with open(os.path.join(build_dir, "kernel.h"), "w") as f:
+        f.write(h_content)
+
+    # kernel.cpp
+    with open(os.path.join(tpl_dir, "kernel_template.cpp")) as f:
+        cpp_tpl = f.read()
+    cpp_content = cpp_tpl.format(
+        function_name="main_kernel",
+        func_params=", ".join(f"unsigned long long {n}" for n in param_names),
+        struct_assignments="\n  ".join(f"api.{n} = {n};" for n in param_names),
+    )
+    with open(os.path.join(build_dir, "kernel.cpp"), "w") as f:
+        f.write(cpp_content)
+
+    # main.cpp
+    with open(os.path.join(tpl_dir, "main_template.cpp")) as f:
+        main_tpl = f.read()
+
+    arg_decls, dev_decls, mallocs, s2d, d2s, frees, call_args = [], [], [], [], [], [], []
+    for i in range(num_args):
+        name = f"arg{i}"
+        dt = dtype_map[i]
+        rows, cols = shapes[i]
+        arg_decls.append(f"  char* {name} = argv[{i+1}];")
+        arg_decls.append(f"  size_t {name}_size = {rows} * {cols} * sizeof({dt});")
+        dev_decls.append(f"  void *dev_{name};")
+        mallocs.append(f"  tpuRtMalloc((void **)(&dev_{name}), {name}_size, 0);")
+        s2d.append(f"  tpuRtMemcpyS2D(dev_{name}, {name}, {name}_size);")
+        if i in result_idx:
+            d2s.append(f"  tpuRtMemcpyD2S({name}, dev_{name}, {name}_size);")
+        frees.append(f"  tpuRtFree(&dev_{name}, 0);")
+        call_args.append(f"(unsigned long long)dev_{name}")
+
+    kernel_call = f'  int rst = main_kernel({", ".join(call_args)});'
+    pure_kernel_call = f'  rst = main_kernel({", ".join(call_args)});'
+
+    main_content = main_tpl.format(
+        arg_declarations="\n".join(arg_decls),
+        device_declarations="\n".join(dev_decls),
+        malloc_statements="\n".join(mallocs),
+        memcpy_s2d_statements="\n".join(s2d),
+        memcpy_d2s_statements="\n".join(d2s),
+        free_statements="\n".join(frees),
+        kernel_call=kernel_call,
+        pure_kernel_call=pure_kernel_call,
+    )
+    with open(os.path.join(build_dir, "main.cpp"), "w") as f:
+        f.write(main_content)
+
+
+# ── Step 3: compile everything → main.so ──────────────────────────────────────
+
+def _compile_to_so(build_dir, kernel_c_path, mode="pcie"):
+    PPL_TOP = get_ppl_project_root()
+    CHIP = "bm1690"
+
+    includes = [
+        "-I/lib/x86_64-linux-gnu/",
+        f"-I{build_dir}",
+        f"-I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include",
+        f"-I{PPL_TOP}/runtime/kernel",
+        f"-I{PPL_TOP}/runtime/customize/include",
+        f"-I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include",
+    ]
+    lib_paths = [
+        "-L/lib/x86_64-linux-gnu/",
+        f"-L{PPL_TOP}/runtime/{CHIP}/lib",
+        "-L/opt/tpuv7/tpuv7-current/lib/",
+        f"-L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
+    ]
+    rpath = f"-Wl,-rpath,{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib"
+
+    TOOLCHAIN = f"{PPL_TOP}/third_party/toolchains_dir/Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1"
+    CROSS_GCC = f"{TOOLCHAIN}/bin/riscv64-unknown-linux-gnu-gcc"
+
+    def run(cmd):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{r.stderr}")
+
+    # Copy kernel.c into build_dir
+    shutil.copy2(kernel_c_path, os.path.join(build_dir, "kernel.c"))
+
+    # 1) cross-compile kernel.c → kernel.o
+    run([CROSS_GCC, "-D__bm1690__", "-Dlibkernel_EXPORTS", *includes,
+         "-Wl,--no-undefined", "-fPIC", "-c",
+         os.path.join(build_dir, "kernel.c"),
+         "-o", os.path.join(build_dir, "kernel.o")])
+
+    # 2) cross-compile ppl_helper.c → ppl_helper.o
+    run([CROSS_GCC, "-D__bm1690__", "-Dlibkernel_EXPORTS", *includes,
+         "-Wl,--no-undefined", "-fPIC", "-c",
+         f"{PPL_TOP}/runtime/customize/src/ppl_helper.c",
+         "-o", os.path.join(build_dir, "ppl_helper.o")])
+
+    # 3) link → libkernel.so
+    run([CROSS_GCC, "-fPIC", "-Wl,--no-undefined", "-shared",
+         "-Wl,-soname,libkernel.so",
+         "-o", os.path.join(build_dir, "libkernel.so"),
+         os.path.join(build_dir, "kernel.o"),
+         os.path.join(build_dir, "ppl_helper.o"),
+         *lib_paths, rpath,
+         "-Wl,--whole-archive", "-Wl,-Bstatic", f"-l{CHIP}",
+         "-Wl,-Bdynamic", "-Wl,--no-whole-archive", "-lm"])
+
+    # 4) compile kernel.cpp → kernel_host.o
+    run(["g++", f"-D__{CHIP}__", *includes, "-Wl,--no-undefined",
+         "-std=c++11", "-fPIC", "-c",
+         os.path.join(build_dir, "kernel.cpp"),
+         "-o", os.path.join(build_dir, "kernel_host.o")])
+
+    # 5) compile main.cpp → main.o
+    run(["g++", f"-D__{CHIP}__", *includes, "-Wl,--no-undefined",
+         "-std=c++11", "-fPIC", "-c",
+         os.path.join(build_dir, "main.cpp"),
+         "-o", os.path.join(build_dir, "main.o")])
+
+    # 6) link → main.so
+    main_so = os.path.join(build_dir, "main.so")
+    run(["g++", "-shared", "-fPIC", "-Wl,--no-undefined",
+         "-o", main_so,
+         os.path.join(build_dir, "kernel_host.o"),
+         os.path.join(build_dir, "main.o"),
+         *lib_paths, rpath,
+         "-ltpuv7_rt", "-lcdm_daemon_emulator", "-lpthread"])
+
+    return main_so
+
+
+# ── Step 4: wrap into a callable ──────────────────────────────────────────────
+
+def _make_forward(main_so_path, result_idx):
+    lib = ctypes.CDLL(main_so_path)
+
+    def forward(*args):
+        raw_bufs = [bytes(arg.cpu().untyped_storage()) for arg in args]
+        argc = len(args) + 1
+        c_args = [ctypes.c_char_p(b) for b in raw_bufs]
+        c_args = [b"./main"] + c_args
+        argv = (ctypes.c_char_p * argc)()
+        argv[:] = c_args
+        ret = lib.main(argc, argv)
+        for i in result_idx:
+            tensor = torch.frombuffer(raw_bufs[i], dtype=args[i].dtype)
+            tensor = tensor.reshape(args[i].shape)
+            args[i][...] = tensor
+        return ret
+
+    return forward
+
+
+# ── public API ────────────────────────────────────────────────────────────────
+
+_TORCH_TO_PPL_DTYPE = {
+    torch.float32: "DT_FP32",
+    torch.float16: "DT_FP16",
+    torch.bfloat16: "DT_BFP16",
+    torch.int32: "DT_INT32",
+}
+
+
+def compile_ppl_kernel(pl_path, arg_specs, result_idx):
+    """Compile a .pl into a callable kernel via tilelang's host framework.
+
+    Args:
+        pl_path: path to the .pl file
+        arg_specs: list of (shape_tuple, torch_dtype) for each kernel argument,
+                   e.g. [((64,64), torch.float32), ((64,64), torch.float32), ...]
+        result_idx: list of output argument indices (0-based)
+
+    Returns:
+        A callable: forward(tensor_0, tensor_1, ...) -> int
+    """
+    kernel_c = compile_pl(pl_path)
+
+    build_dir = tempfile.mkdtemp(prefix="ppl_tl_build_")
+
+    num_args = len(arg_specs)
+    dtype_map = [_TORCH_TO_PPL_DTYPE[spec[1]] for spec in arg_specs]
+    shapes = [spec[0] for spec in arg_specs]
+
+    # Set PPL_KERNEL_PATH for the runtime to find libkernel.so
+    os.environ["PPL_KERNEL_PATH"] = os.path.join(build_dir, "libkernel.so")
+
+    _generate_templates(build_dir, num_args, dtype_map, shapes, result_idx)
+    main_so = _compile_to_so(build_dir, kernel_c)
+    forward = _make_forward(main_so, result_idx)
+
+    return forward

@@ -16,7 +16,7 @@ int init(){{
   if (ret != tpuRtSuccess) {{
     return -1;
   }}
-  tpuRtSetDevice(14); // Set TPU ID
+  tpuRtSetDevice(15); // Set TPU ID
   tpuRtStreamCreate(&stream);
   auto kernel_dir = getenv("PPL_KERNEL_PATH");
   if (!kernel_dir) {{

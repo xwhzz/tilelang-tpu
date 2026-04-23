@@ -51,8 +51,10 @@ def swi_glu(Block_w, Block_c, C, W, dtype="float32", accum_dtype="float32"):
     return main_kernel_inner
 
 
-C = 1024
-W = 1024
+# C = 1024
+# W = 1024
+C = 64
+W = 64
 block_C = 32
 block_W = 32
 kernel = tilelang.compile(swi_glu(Block_c=block_C, Block_w=block_W, C=C, W=W), out_idx=-1, target="tpu") #,pass_config={"disable_storage_rewrite": True})
