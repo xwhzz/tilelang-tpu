@@ -216,13 +216,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
             def lambda_forward(*args):
                 # for i, arg in enumerate(args):
                 #     print(f"参数 {i}: shape = {arg.shape}, dtype = {arg.dtype}")
-                args1 = [bytes(arg.cpu().untyped_storage()) for arg in args]
+                args1 = [bytearray(arg.cpu().untyped_storage()) for arg in args]
                 argc = len(args)+1
-                
-                args2= [ctypes.c_char_p(arg) for arg in args1]
-                args2 = [b"./main"]+args2
+
+                c_bufs = [(ctypes.c_char * len(arg)).from_buffer(arg) for arg in args1]
+                c_ptrs = [ctypes.cast(buf, ctypes.c_char_p) for buf in c_bufs]
+                c_ptrs = [b"./main"] + c_ptrs
                 argv = (ctypes.c_char_p * argc)()
-                argv[:] = args2
+                argv[:] = c_ptrs
                 argc = len(argv)
                 ret=self.lib.main(argc, argv)
                 args_list = list(args)

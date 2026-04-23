@@ -258,12 +258,13 @@ def _make_forward(main_so_path, result_idx):
     lib = ctypes.CDLL(main_so_path)
 
     def forward(*args):
-        raw_bufs = [bytes(arg.cpu().untyped_storage()) for arg in args]
+        raw_bufs = [bytearray(arg.cpu().untyped_storage()) for arg in args]
         argc = len(args) + 1
-        c_args = [ctypes.c_char_p(b) for b in raw_bufs]
-        c_args = [b"./main"] + c_args
+        c_bufs = [(ctypes.c_char * len(b)).from_buffer(b) for b in raw_bufs]
+        c_ptrs = [ctypes.cast(buf, ctypes.c_char_p) for buf in c_bufs]
+        c_ptrs = [b"./main"] + c_ptrs
         argv = (ctypes.c_char_p * argc)()
-        argv[:] = c_args
+        argv[:] = c_ptrs
         ret = lib.main(argc, argv)
         for i in result_idx:
             tensor = torch.frombuffer(raw_bufs[i], dtype=args[i].dtype)
