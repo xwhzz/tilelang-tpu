@@ -82,10 +82,23 @@ def run_and_check(name, kernel_func, x, cos_val, sin_val, ref):
     return correct
 
 
+def make_rope_cos_sin(C, W, dtype=torch.float32):
+    half = W // 2
+    k = torch.arange(half, dtype=dtype)
+    inv_freq = (10000.0 ** (-2 * k / W)).to(dtype)
+    pos = torch.arange(C, dtype=dtype).unsqueeze(1)
+    theta = pos * inv_freq
+    c, s = torch.cos(theta), torch.sin(theta)
+    cos = torch.empty(C, W, dtype=dtype)
+    sin = torch.empty(C, W, dtype=dtype)
+    cos[:, 0::2] = c; cos[:, 1::2] = c
+    sin[:, 0::2] = s; sin[:, 1::2] = s
+    return cos.contiguous(), sin.contiguous()
+
+
 def main():
     x = torch.randn(C, W, dtype=torch.float32)
-    cos_val = torch.randn(C, W, dtype=torch.float32)
-    sin_val = torch.randn(C, W, dtype=torch.float32)
+    cos_val, sin_val = make_rope_cos_sin(C, W)
     ref = torch_rope_ref(x, cos_val, sin_val)
 
     print("=" * 60)
