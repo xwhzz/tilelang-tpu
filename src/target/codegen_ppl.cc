@@ -942,7 +942,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-          std::cout << "min_expr: " << min_expr << std::endl;
+          // std::cout << "min_expr: " << min_expr << std::endl;
           inst.push_back("__ppl_tensor_info " + new_src_var +
                          " = {.shape = " + src_shape +
                          ", .stride = " + src_strides + ", .addr = " + src_id +
@@ -960,7 +960,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         }
         return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
       };
-      tvm::Dump(op);
+      // tvm::Dump(op);
       tl::RegionOp src =
           tl::RegionOp(op->args[1].as<CallNode>()->args, buffer_map);
       // tvm::Dump(src);

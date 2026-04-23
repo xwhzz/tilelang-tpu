@@ -236,7 +236,7 @@ PrimFunc InferAddress(PrimFunc f) {
   // for (auto &op : alloc_ops) {
   //   bank_conflict_map.Set(op, {});
   // }
-  std::cout << "collect ops num:" << alloc_ops.size() << std::endl;
+  // std::cout << "collect ops num:" << alloc_ops.size() << std::endl;
 
   for (auto &op : alloc_ops) {
     for (auto &op2 : alloc_ops) {
@@ -314,8 +314,8 @@ PrimFunc InferAddress(PrimFunc f) {
       fn_attr->dict.Set(op->name, PrimExpr(address));
     }
   }
-  std::cerr << "[AddressAssign] success=" << std::boolalpha << success
-          << " total=" << memUsedWithBC << " bytes\n";
+  // std::cerr << "[AddressAssign] success=" << std::boolalpha << success
+  //         << " total=" << memUsedWithBC << " bytes\n";
 
   return f;
 }

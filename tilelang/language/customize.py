@@ -164,11 +164,12 @@ def ppl_copy(
         elif isinstance(data, BufferRegion):
             return [x.extent for x in data.region]
         elif isinstance(data, BufferLoad):
-            print(data.indices)
+            # print(data.indices)
+            pass
         else:
             return None
 
-    print(type(src))
+    # print(type(src))
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
@@ -186,8 +187,8 @@ def ppl_copy(
 
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
-    print(src)
-    print(dst)
+    # print(src)
+    # print(dst)
     return T.call_extern("handle", "ppl.copy", src, dst)
 
 

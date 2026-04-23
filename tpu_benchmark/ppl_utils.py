@@ -180,7 +180,7 @@ def _compile_to_so(build_dir, kernel_c_path, mode="pcie"):
     CHIP = "bm1690"
 
     includes = [
-        "-I/lib/x86_64-linux-gnu/",
+        # "-I/lib/x86_64-linux-gnu/",
         f"-I{build_dir}",
         f"-I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include",
         f"-I{PPL_TOP}/runtime/kernel",
@@ -188,7 +188,7 @@ def _compile_to_so(build_dir, kernel_c_path, mode="pcie"):
         f"-I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include",
     ]
     lib_paths = [
-        "-L/lib/x86_64-linux-gnu/",
+        # "-L/lib/x86_64-linux-gnu/",
         f"-L{PPL_TOP}/runtime/{CHIP}/lib",
         "-L/opt/tpuv7/tpuv7-current/lib/",
         f"-L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
