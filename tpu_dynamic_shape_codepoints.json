@@ -1,0 +1,219 @@
+{
+  "source_doc": "05_TPU_编译主链与动态Shape迁移拆解.md",
+  "workspace": "/home/dzh/workspace/tilelang-tpu",
+  "generated_on": "2026-04-24",
+  "important_shape_points": [
+    {
+      "id": "IMP001",
+      "file": "tilelang/language/__init__.py",
+      "line_start": 82,
+      "line_end": 83,
+      "symbol": "symbolic",
+      "evidence": "def symbolic(name: str, dtype: str = \"int32\"): return tir.Var(name, dtype)",
+      "importance": "dynamic-shape front-end entry"
+    },
+    {
+      "id": "IMP002",
+      "file": "tilelang/language/customize.py",
+      "line_start": 127,
+      "line_end": 132,
+      "symbol": "ppl_gemm",
+      "evidence": "M = C.shape[0]; N = C.shape[1]; K = ...; T.call_extern(..., M, N, K)",
+      "importance": "TPU extern GEMM shape parameter source"
+    },
+    {
+      "id": "IMP003",
+      "file": "tilelang/language/customize.py",
+      "line_start": 451,
+      "line_end": 452,
+      "symbol": "ppl_reduce_sum_safe",
+      "evidence": "align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num; stride = T.ceildiv(inp.shape[0], channel) * align_w",
+      "importance": "shape-derived PrimExpr before reduce extern call"
+    },
+    {
+      "id": "IMP004",
+      "file": "tilelang/language/customize.py",
+      "line_start": 502,
+      "line_end": 503,
+      "symbol": "ppl_reduce_max_safe",
+      "evidence": "align_w = T.ceildiv(inp.shape[1], eu_num) * eu_num; stride = T.ceildiv(inp.shape[0], channel) * align_w",
+      "importance": "shape-derived PrimExpr before reduce extern call"
+    },
+    {
+      "id": "IMP005",
+      "file": "tilelang/transform/__init__.py",
+      "line_start": 278,
+      "line_end": 287,
+      "symbol": "LoopVectorizeDynamic",
+      "evidence": "def LoopVectorizeDynamic(): return _ffi_api.LoopVectorizeDynamic()",
+      "importance": "dynamic-shape-aware vectorization pass entry"
+    },
+    {
+      "id": "IMP006",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 714,
+      "line_end": 714,
+      "symbol": "vector2string",
+      "evidence": "inline std::string vector2string(const std::vector<int> &vec)",
+      "importance": "shape container representation in TPU codegen"
+    },
+    {
+      "id": "IMP007",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 768,
+      "line_end": 770,
+      "symbol": "buffer_shape",
+      "evidence": "auto dst_shape = buffer_shape[dst]; auto src0_shape = ...; auto src1_shape = ...",
+      "importance": "shape cache read in elementwise codegen path"
+    },
+    {
+      "id": "IMP008",
+      "file": "tilelang/jit/adapter/cython/adapter.py",
+      "line_start": 311,
+      "line_end": 319,
+      "symbol": "_process_dynamic_symbolic",
+      "evidence": "if isinstance(shape, tir.Var): dynamic_symbolic_map[shape] = (i, j)",
+      "importance": "runtime symbolic-shape binding map"
+    },
+    {
+      "id": "IMP009",
+      "file": "tilelang/jit/adapter/cython/adapter.py",
+      "line_start": 359,
+      "line_end": 370,
+      "symbol": "_process_static_shape",
+      "evidence": "if isinstance(s, tir.IntImm): static_shape.append((j, s.value))",
+      "importance": "runtime static-shape constraint extraction"
+    },
+    {
+      "id": "IMP010",
+      "file": "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+      "line_start": 146,
+      "line_end": 154,
+      "symbol": "forward static/dynamic handling",
+      "evidence": "Check static_shape_map then append dynamic_symbolic_map values to call_args",
+      "importance": "runtime shape check and dynamic argument injection"
+    }
+  ],
+  "static_dynamic_overlap_or_conflicts": [
+    {
+      "id": "SD001",
+      "file": "tilelang/engine/phase.py",
+      "line_start": 35,
+      "line_end": 35,
+      "symbol": "LowerAndLegalize",
+      "overlap_or_conflict": "conflict",
+      "evidence": "# mod = tilelang.transform.LoopVectorizeDynamic()(mod)",
+      "reason": "Dynamic pass exists but is disabled in TPU lowering path."
+    },
+    {
+      "id": "SD002",
+      "file": "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+      "line_start": 146,
+      "line_end": 154,
+      "symbol": "forward static + dynamic",
+      "overlap_or_conflict": "overlap",
+      "evidence": "static_shape_map check and dynamic_symbolic_map append both happen in one path",
+      "reason": "Generic JIT already mixes static constraints with dynamic runtime args."
+    },
+    {
+      "id": "SD003",
+      "file": "src/transform/address_assign.cc",
+      "line_start": 275,
+      "line_end": 277,
+      "symbol": "AddressAssign shape check",
+      "overlap_or_conflict": "conflict",
+      "evidence": "ICHECK(s.as<IntImmNode>()) << \"Only IntImm shapes are supported in AddressAssign\"",
+      "reason": "Dynamic symbolic extents fail immediately in address assignment."
+    },
+    {
+      "id": "SD004",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 868,
+      "line_end": 877,
+      "symbol": "ppl.copy region extent",
+      "overlap_or_conflict": "conflict",
+      "evidence": "src_ranges[i]->extent.as<IntImmNode>()->value",
+      "reason": "Copy region extents are forced to compile-time IntImm."
+    },
+    {
+      "id": "SD005",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 1057,
+      "line_end": 1059,
+      "symbol": "ppl.gemm dims",
+      "overlap_or_conflict": "conflict",
+      "evidence": "auto M = Downcast<IntImm>(op->args[6])->value; auto N = ...; auto K = ...",
+      "reason": "GEMM M/N/K extraction is IntImm-only."
+    },
+    {
+      "id": "SD006",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 1134,
+      "line_end": 1136,
+      "symbol": "ppl.reduce_max attrs",
+      "overlap_or_conflict": "conflict",
+      "evidence": "auto eu_num = Downcast<IntImm>(op->args[4])->value; auto align_w = ...; auto stride_n = ...",
+      "reason": "Reduce attributes are forced to IntImm."
+    },
+    {
+      "id": "SD007",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 1346,
+      "line_end": 1348,
+      "symbol": "ppl.reduce_sum attrs",
+      "overlap_or_conflict": "conflict",
+      "evidence": "auto eu_num = Downcast<IntImm>(op->args[4])->value; auto align_w = ...; auto stride_n = ...",
+      "reason": "Reduce-sum attributes are forced to IntImm."
+    },
+    {
+      "id": "SD008",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 1752,
+      "line_end": 1771,
+      "symbol": "VisitStmt_(AllocateNode)",
+      "overlap_or_conflict": "conflict",
+      "evidence": "std::vector<int> shapes; ... buffer_shape[k].as<IntImmNode>()->value",
+      "reason": "Local allocation metadata and size are computed with static IntImm-only shape."
+    },
+    {
+      "id": "SD009",
+      "file": "src/target/codegen_ppl.cc",
+      "line_start": 1944,
+      "line_end": 1963,
+      "symbol": "AddFunction global tensor info",
+      "overlap_or_conflict": "conflict",
+      "evidence": "shape[i].as<IntImmNode>()->value; tensor_size *= dim_i",
+      "reason": "Global parameter tensor info materialization assumes static shape literals."
+    },
+    {
+      "id": "SD010",
+      "file": "tilelang/jit/adapter/cython/adapter.py",
+      "line_start": 224,
+      "line_end": 227,
+      "symbol": "TPU lambda_forward argv",
+      "overlap_or_conflict": "conflict",
+      "evidence": "argv = (ctypes.c_char_p * argc)(); ret=self.lib.main(argc, argv)",
+      "reason": "TPU branch uses raw byte argv path and does not pass explicit symbolic-shape runtime args."
+    },
+    {
+      "id": "SD011",
+      "file": "tilelang/jit/adapter/wrapper.py",
+      "line_start": 734,
+      "line_end": 751,
+      "symbol": "TLTPUSourceWrapper.create_main_cpp",
+      "overlap_or_conflict": "conflict",
+      "evidence": "data_size = \" * \".join([str(dim) for dim in arg[\"shape\"]]) + f\" * sizeof({arg['type']})\"",
+      "reason": "Host-side generated code expands compile-time shape literals, lacking runtime symbolic binding."
+    },
+    {
+      "id": "SD012",
+      "file": "tilelang/engine/phase.py",
+      "line_start": 76,
+      "line_end": 77,
+      "symbol": "OptimizeForTarget tail",
+      "overlap_or_conflict": "conflict",
+      "evidence": "mod = tilelang.transform.AddressAssign()(mod); return mod",
+      "reason": "Pipeline exits after static-only AddressAssign and blocks later generic runtime-lowering path."
+    }
+  ]
+}
