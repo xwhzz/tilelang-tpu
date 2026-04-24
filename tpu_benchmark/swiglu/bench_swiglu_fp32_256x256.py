@@ -1,5 +1,5 @@
 """
-Benchmark: SwiGLU FP32 64x64 — tilelang vs PPL
+Benchmark: SwiGLU FP32 256x256 — tilelang vs PPL
 """
 
 import os, sys, torch, torch.nn.functional as F
@@ -11,7 +11,7 @@ sys.path.insert(0, BENCHMARK_ROOT)
 import tilelang
 import tilelang.language as T
 
-C, W = 64, 64
+C, W = 256, 256
 BLOCK_C, BLOCK_W = 32, 32
 ATOL, RTOL = 1e-2, 1e-2
 

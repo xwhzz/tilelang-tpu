@@ -1,5 +1,5 @@
 """
-Benchmark: Elementwise Add BF16 64x64 — tilelang vs PPL
+Benchmark: Elementwise Add FP32 1024x1024 — tilelang vs PPL
 """
 
 import os, sys, torch
@@ -11,14 +11,12 @@ sys.path.insert(0, BENCHMARK_ROOT)
 import tilelang
 import tilelang.language as T
 
-M, N = 64, 64
+M, N = 1024, 1024
 BLOCK_M, BLOCK_N = 32, 32
-ATOL, RTOL = 1e-2, 1e-2
+ATOL, RTOL = 1e-5, 1e-5
 
 
-def tl_add_lowp(M, N, block_M, block_N):
-    dtype = "bfloat16"
-
+def tl_add(M, N, block_M, block_N, dtype="float32"):
     @T.prim_func
     def main_kernel_inner(
         A: T.Tensor((M, N), dtype),
@@ -38,33 +36,34 @@ def tl_add_lowp(M, N, block_M, block_N):
 
 
 def run_and_check(name, kernel_func, a, b, ref):
-    c = torch.zeros(M, N, dtype=torch.bfloat16)
+    c = torch.zeros(M, N, dtype=torch.float32)
     kernel_func(a, b, c)
     correct = torch.allclose(c, ref, atol=ATOL, rtol=RTOL)
-    max_diff = (c.float() - ref.float()).abs().max().item()
-    avg_diff = (c.float() - ref.float()).abs().mean().item()
+    max_diff = (c - ref).abs().max().item()
+    avg_diff = (c - ref).abs().mean().item()
     print(f"  [{name}] correct={correct}  max_diff={max_diff:.6f}  avg_diff={avg_diff:.8f}")
+    return correct
 
 
 def main():
-    a = torch.randn(M, N, dtype=torch.bfloat16)
-    b = torch.randn(M, N, dtype=torch.bfloat16)
+    a = torch.randn(M, N, dtype=torch.float32)
+    b = torch.randn(M, N, dtype=torch.float32)
     ref = a + b
 
     print("=" * 60)
-    print(f"Elementwise Add BF16  M={M} N={N}  block={BLOCK_M}x{BLOCK_N}")
+    print(f"Elementwise Add FP32  M={M} N={N}  block={BLOCK_M}x{BLOCK_N}")
     print("=" * 60)
 
     print("\n--- tilelang ---")
     tl_kernel = tilelang.compile(
-        tl_add_lowp(M, N, BLOCK_M, BLOCK_N), out_idx=-1, target="tpu")
+        tl_add(M, N, BLOCK_M, BLOCK_N), out_idx=-1, target="tpu")
     run_and_check("tilelang", tl_kernel, a, b, ref)
 
     print("\n--- PPL ---")
     try:
         from ppl_utils import compile_ppl_kernel, generate_pl
-        pl_path = generate_pl("add", "bfloat16", {"M": M, "N": N})
-        arg_specs = [((M, N), torch.bfloat16)] * 3
+        pl_path = generate_pl("add", "float32", {"M": M, "N": N})
+        arg_specs = [((M, N), torch.float32)] * 3
         ppl_forward = compile_ppl_kernel(pl_path, arg_specs, result_idx=[2])
         run_and_check("PPL", ppl_forward, a, b, ref)
     except Exception as e:

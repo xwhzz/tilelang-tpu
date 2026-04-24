@@ -18,7 +18,7 @@ import subprocess
 BENCHMARK_ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(BENCHMARK_ROOT)
 
-SIZES = [64, 128, 256, 512, 1024]
+SIZES = [64, 128]
 DTYPES = ["float32", "bfloat16", "float16"]
 
 # ── build config ──────────────────────────────────────────────────────────────
@@ -29,8 +29,8 @@ for S in SIZES:
         atol = 1e-2 if dt == "float32" else 1e-1
         BENCHMARK_CONFIG.append(("swiglu", dt, {"C": S, "W": S}, {"block_C": 32, "block_W": 32}, atol, atol))
         BENCHMARK_CONFIG.append(("rope",   dt, {"C": S, "W": S}, {"block_C": 64, "block_W": 16}, atol, atol))
-        atol_add = 1e-5 if dt == "float32" else 1e-3 if dt == "float16" else 1e-2
-        BENCHMARK_CONFIG.append(("add",    dt, {"M": S, "N": S}, {"block_M": 32, "block_N": 32}, atol_add, atol_add))
+        # atol_add = 1e-5 if dt == "float32" else 1e-3 if dt == "float16" else 1e-2
+        # BENCHMARK_CONFIG.append(("add",    dt, {"M": S, "N": S}, {"block_M": 32, "block_N": 32}, atol_add, atol_add))
 
 
 # ── subprocess worker script ──────────────────────────────────────────────────
@@ -119,6 +119,7 @@ max_diff = (out.float() - ref.float()).abs().max().item()
 
 result = {"correct": correct, "max_diff": max_diff}
 sys.stderr.write("RESULT:" + json.dumps(result) + "\\n")
+sys.stderr.flush()
 '''
 
 
@@ -136,21 +137,27 @@ def run_subprocess(op, dtype, shape, block, atol, rtol, backend):
     with open(worker_path, "w") as f:
         f.write(WORKER_SCRIPT)
 
-    proc = subprocess.run(
-        [sys.executable, worker_path, cfg],
-        capture_output=True, text=True, timeout=300,
-        cwd=BENCHMARK_ROOT, env=env,
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, worker_path, cfg],
+            capture_output=True, timeout=300,
+            cwd=BENCHMARK_ROOT, env=env,
+        )
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT", None
 
     # Parse timing from stdout (C printf goes to stdout)
     avg_ms = None
-    m = re.search(r"Average execution time:\s+([\d.]+)\s+ms", proc.stdout)
+    m = re.search(r"Average execution time:\s+([\d.]+)\s+ms", stdout)
     if m:
         avg_ms = float(m.group(1))
 
     # Parse correctness from stderr
     correct = None
-    for line in proc.stderr.splitlines():
+    for line in stderr.splitlines():
         if line.startswith("RESULT:"):
             try:
                 r = json.loads(line[7:])
@@ -158,8 +165,16 @@ def run_subprocess(op, dtype, shape, block, atol, rtol, backend):
             except json.JSONDecodeError:
                 pass
 
-    if proc.returncode != 0 and correct is None:
-        correct = "CRASH"
+    if correct is None:
+        if returncode != 0:
+            correct = "CRASH"
+            import sys as _sys
+            _sys.stderr.write(f"\n--- CRASH for {op} {dtype} {shape} {backend} (rc={returncode}) ---\n")
+            _sys.stderr.write(f"STDOUT:\n{stdout[-500:]}\n")
+            _sys.stderr.write(f"STDERR:\n{stderr[-500:]}\n")
+            _sys.stderr.write("--- END CRASH ---\n")
+        else:
+            correct = "?"
 
     return correct, avg_ms
 

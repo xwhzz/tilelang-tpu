@@ -1,5 +1,5 @@
 """
-Benchmark: Elementwise Add BF16 64x64 — tilelang vs PPL
+Benchmark: Elementwise Add FP16 256x256 — tilelang vs PPL
 """
 
 import os, sys, torch
@@ -11,13 +11,13 @@ sys.path.insert(0, BENCHMARK_ROOT)
 import tilelang
 import tilelang.language as T
 
-M, N = 64, 64
+M, N = 256, 256
 BLOCK_M, BLOCK_N = 32, 32
-ATOL, RTOL = 1e-2, 1e-2
+ATOL, RTOL = 1e-3, 1e-3
 
 
 def tl_add_lowp(M, N, block_M, block_N):
-    dtype = "bfloat16"
+    dtype = "float16"
 
     @T.prim_func
     def main_kernel_inner(
@@ -38,7 +38,7 @@ def tl_add_lowp(M, N, block_M, block_N):
 
 
 def run_and_check(name, kernel_func, a, b, ref):
-    c = torch.zeros(M, N, dtype=torch.bfloat16)
+    c = torch.zeros(M, N, dtype=torch.float16)
     kernel_func(a, b, c)
     correct = torch.allclose(c, ref, atol=ATOL, rtol=RTOL)
     max_diff = (c.float() - ref.float()).abs().max().item()
@@ -47,12 +47,12 @@ def run_and_check(name, kernel_func, a, b, ref):
 
 
 def main():
-    a = torch.randn(M, N, dtype=torch.bfloat16)
-    b = torch.randn(M, N, dtype=torch.bfloat16)
+    a = torch.randn(M, N, dtype=torch.float16)
+    b = torch.randn(M, N, dtype=torch.float16)
     ref = a + b
 
     print("=" * 60)
-    print(f"Elementwise Add BF16  M={M} N={N}  block={BLOCK_M}x{BLOCK_N}")
+    print(f"Elementwise Add FP16  M={M} N={N}  block={BLOCK_M}x{BLOCK_N}")
     print("=" * 60)
 
     print("\n--- tilelang ---")
@@ -63,8 +63,8 @@ def main():
     print("\n--- PPL ---")
     try:
         from ppl_utils import compile_ppl_kernel, generate_pl
-        pl_path = generate_pl("add", "bfloat16", {"M": M, "N": N})
-        arg_specs = [((M, N), torch.bfloat16)] * 3
+        pl_path = generate_pl("add", "float16", {"M": M, "N": N})
+        arg_specs = [((M, N), torch.float16)] * 3
         ppl_forward = compile_ppl_kernel(pl_path, arg_specs, result_idx=[2])
         run_and_check("PPL", ppl_forward, a, b, ref)
     except Exception as e:

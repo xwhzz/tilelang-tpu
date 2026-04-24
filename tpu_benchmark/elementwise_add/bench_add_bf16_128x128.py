@@ -1,5 +1,5 @@
 """
-Benchmark: Elementwise Add BF16 64x64 — tilelang vs PPL
+Benchmark: Elementwise Add BF16 128x128 — tilelang vs PPL
 """
 
 import os, sys, torch
@@ -11,7 +11,7 @@ sys.path.insert(0, BENCHMARK_ROOT)
 import tilelang
 import tilelang.language as T
 
-M, N = 64, 64
+M, N = 128, 128
 BLOCK_M, BLOCK_N = 32, 32
 ATOL, RTOL = 1e-2, 1e-2
 

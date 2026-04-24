@@ -1,14 +1,8 @@
 """
 Benchmark: Elementwise Add FP32 64x64 — tilelang vs PPL
-
-Usage:
-    cd /mnt2/users/tilelanguser-xxw/tilelang-tpu
-    python tpu_benchmark/elementwise_add/bench_add_fp32_64x64.py
 """
 
-import os
-import sys
-import torch
+import os, sys, torch
 
 BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
 BENCHMARK_ROOT = os.path.dirname(BENCH_DIR)
@@ -22,7 +16,6 @@ BLOCK_M, BLOCK_N = 32, 32
 ATOL, RTOL = 1e-5, 1e-5
 
 
-# ── tilelang kernel ──────────────────────────────────────────────────────────
 def tl_add(M, N, block_M, block_N, dtype="float32"):
     @T.prim_func
     def main_kernel_inner(
@@ -61,28 +54,21 @@ def main():
     print(f"Elementwise Add FP32  M={M} N={N}  block={BLOCK_M}x{BLOCK_N}")
     print("=" * 60)
 
-    # ── tilelang ──
     print("\n--- tilelang ---")
     tl_kernel = tilelang.compile(
         tl_add(M, N, BLOCK_M, BLOCK_N), out_idx=-1, target="tpu")
     run_and_check("tilelang", tl_kernel, a, b, ref)
 
-    # ── PPL ──
     print("\n--- PPL ---")
     try:
-        from ppl_utils import compile_ppl_kernel
-        pl_path = os.path.join(BENCH_DIR, "pl", "add_fp32_64x64.pl")
-        arg_specs = [
-            ((M, N), torch.float32),
-            ((M, N), torch.float32),
-            ((M, N), torch.float32),
-        ]
+        from ppl_utils import compile_ppl_kernel, generate_pl
+        pl_path = generate_pl("add", "float32", {"M": M, "N": N})
+        arg_specs = [((M, N), torch.float32)] * 3
         ppl_forward = compile_ppl_kernel(pl_path, arg_specs, result_idx=[2])
         run_and_check("PPL", ppl_forward, a, b, ref)
     except Exception as e:
         print(f"  PPL failed: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
 
     print("\n" + "=" * 60)
 

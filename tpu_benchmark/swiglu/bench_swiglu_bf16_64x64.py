@@ -1,15 +1,8 @@
 """
 Benchmark: SwiGLU BF16 64x64 — tilelang vs PPL
-
-Usage:
-    cd /mnt2/users/tilelanguser-xxw/tilelang-tpu
-    python tpu_benchmark/swiglu/bench_swiglu_bf16_64x64.py
 """
 
-import os
-import sys
-import torch
-import torch.nn.functional as F
+import os, sys, torch, torch.nn.functional as F
 
 BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
 BENCHMARK_ROOT = os.path.dirname(BENCH_DIR)
@@ -23,7 +16,7 @@ BLOCK_C, BLOCK_W = 32, 32
 ATOL, RTOL = 1e-1, 1e-1
 
 
-def tl_swiglu_bf16(Block_w, Block_c, C, W):
+def tl_swiglu_lowp(Block_w, Block_c, C, W):
     dtype = "bfloat16"
     accum_dtype = "float32"
     global_shape = (C, W)
@@ -68,7 +61,7 @@ def tl_swiglu_bf16(Block_w, Block_c, C, W):
 
 
 def torch_ref(a, b):
-    return (b.float() * F.silu(a.float())).bfloat16()
+    return (b.float() * F.silu(a.float())).to(torch.bfloat16)
 
 
 def run_and_check(name, kernel_func, a, b, ref):
@@ -91,20 +84,19 @@ def main():
 
     print("\n--- tilelang ---")
     tl_kernel = tilelang.compile(
-        tl_swiglu_bf16(BLOCK_W, BLOCK_C, C, W), out_idx=-1, target="tpu")
+        tl_swiglu_lowp(BLOCK_W, BLOCK_C, C, W), out_idx=-1, target="tpu")
     run_and_check("tilelang", tl_kernel, a, b, ref)
 
     print("\n--- PPL ---")
     try:
-        from ppl_utils import compile_ppl_kernel
-        pl_path = os.path.join(BENCH_DIR, "pl", "swiglu_bf16_64x64.pl")
+        from ppl_utils import compile_ppl_kernel, generate_pl
+        pl_path = generate_pl("swiglu", "bfloat16", {"C": C, "W": W})
         arg_specs = [((C, W), torch.bfloat16)] * 3
         ppl_forward = compile_ppl_kernel(pl_path, arg_specs, result_idx=[2])
         run_and_check("PPL", ppl_forward, a, b, ref)
     except Exception as e:
         print(f"  PPL failed: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
 
     print("\n" + "=" * 60)
 
