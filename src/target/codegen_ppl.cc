@@ -740,24 +740,44 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                                const std::string &src0, const std::string &src1,
                                const std::string &dtype) -> std::stringstream {
     std::stringstream src1_stride;
-    if (src1_shape[1] == 1 && src0_shape[1] != 1) {
-      std::string stride_var = name_supply_->FreshName(src1 + "_stride");
-      // void tpu_aligned_stride(dim4 *stride, int start_idx, const dim4 *shape,
-      // data_type_t dtype) we must construct explicit stride
-      // 1. initialize a dim4 struct
-      this->PrintIndent();
-      this->stream << "dim4 " << stride_var << ";\n";
-      // 2. call tpu_aligned_stride
-      this->PrintIndent();
-      this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &" << src1
-                   << ".shape, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << stride_var << ".w = 0;\n";
-      src1_stride << "&" << stride_var << ", ";
-    } else if (src1_shape[1] == src0_shape[1]) {
-      src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
-                  << ".stride), ";
+    ICHECK(src0_shape.size() == src1_shape.size());
+    std::vector<std::string> stride_fields;
+    if (src0_shape.size() == 2) {
+      stride_fields = {"c", "w"};
+    } else if (src0_shape.size() == 4) {
+      stride_fields = {"n", "c", "h", "w"};
+    } else {
+      LOG(FATAL) << "Unsupported elementwise rank: " << src0_shape.size();
     }
+    bool need_broadcast_stride = false;
+    for (size_t i = 0; i < src0_shape.size(); ++i) {
+      if (src0_shape[i] == src1_shape[i]) {
+        continue;
+      }
+      if (src1_shape[i] == 1 && src0_shape[i] != 1) {
+        need_broadcast_stride = true;
+        continue;
+      }
+      LOG(FATAL) << "Unsupported broadcast pattern: src0 shape "
+                 << vector2string(src0_shape) << ", src1 shape "
+                 << vector2string(src1_shape);
+    }
+    std::string stride_var = name_supply_->FreshName(src1 + "_stride");
+    this->PrintIndent();
+    this->stream << "dim4 " << stride_var << ";\n";
+    this->PrintIndent();
+    this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &" << src1
+                 << ".shape, " << dtype << ");\n";
+    if (need_broadcast_stride) {
+      for (size_t i = 0; i < src0_shape.size(); ++i) {
+        if (src1_shape[i] == 1 && src0_shape[i] != 1) {
+          this->PrintIndent();
+          this->stream << stride_var << "." << stride_fields[i] << " = 0;\n";
+        }
+      }
+    }
+    src1_stride << "(" << src1 << ".default_stride ? &" << stride_var << " : &"
+                << src1 << ".stride), ";
     return src1_stride;
   };
 
@@ -780,21 +800,31 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (!has_dtype) {
       dtype = "";
     }
+    auto materialize_stride_arg =
+        [&, this](const std::string &tensor, const std::string &dtype_arg) {
+          std::string stride_var = name_supply_->FreshName(tensor + "_stride");
+          this->PrintIndent();
+          this->stream << "dim4 " << stride_var << ";\n";
+          this->PrintIndent();
+          this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &"
+                       << tensor << ".shape, " << dtype_arg << ");\n";
+          return "(" + tensor + ".default_stride ? &" + stride_var + " : &" +
+                 tensor + ".stride)";
+        };
     this->PrintIndent();
     int sid = this->BeginScope();
     this->stream << "{\n";
-    
+    std::string dst_stride_arg = materialize_stride_arg(dst, dtype);
+    std::string src0_stride_arg = materialize_stride_arg(src0, dtype);
     std::stringstream src1_stride =
         process_stride(src0_shape, src1_shape, src0, src1, dtype);
     this->PrintIndent();
     this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, "
                  << src1 << ".addr, "
                  << "&" << dst << ".shape, "
-                 << "(" << dst << ".default_stride ? NULL : &" << dst
-                 << ".stride), "
-                 << "(" << src0 << ".default_stride ? NULL : &" << src0
-                 << ".stride), " << src1_stride.str() << dtype << ");\n";
-    
+                 << dst_stride_arg << ", " << src0_stride_arg << ", "
+                 << src1_stride.str() << dtype << ");\n";
+
     this->EndScope(sid);
     this->PrintIndent();
     this->stream << "}\n";
@@ -806,7 +836,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
     float value = Downcast<FloatImm>(op->args[3])->value;
-    auto src0_shape = buffer_shape[src0];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
     std::string dtype;
     std::string scalar_type;
@@ -820,26 +849,47 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       dtype = "DT_BFP16";
       scalar_type = "bf16";
     }
+    auto materialize_stride_arg =
+        [&, this](const std::string &tensor, const std::string &dtype_arg) {
+          std::string stride_var = name_supply_->FreshName(tensor + "_stride");
+          this->PrintIndent();
+          this->stream << "dim4 " << stride_var << ";\n";
+          this->PrintIndent();
+          this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &"
+                       << tensor << ".shape, " << dtype_arg << ");\n";
+          return "(" + tensor + ".default_stride ? &" + stride_var + " : &" +
+                 tensor + ".stride)";
+        };
     if (dtype == "DT_FP32"){
+      this->PrintIndent();
+      this->stream << "{\n";
+      int sid = this->BeginScope();
+      std::string dst_stride_arg = materialize_stride_arg(dst, dtype);
+      std::string src0_stride_arg = materialize_stride_arg(src0, dtype);
       this->PrintIndent();
       this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, "
                   << "(scalar_t){." << scalar_type << " = " << value << "}, &"
                   << dst << ".shape, "
-                  << "(" << dst << ".default_stride ? NULL : &" << dst
-                  << ".stride), "
-                  << "(" << src0 << ".default_stride ? NULL : &" << src0
-                  << ".stride), " << dtype << ");\n";
+                  << dst_stride_arg << ", " << src0_stride_arg << ", "
+                  << dtype << ");\n";
+      this->EndScope(sid);
+      this->PrintIndent();
+      this->stream << "}\n";
     }
     else{
       this->PrintIndent();
       this->stream << "{\n";
+      int sid = this->BeginScope();
+      std::string dst_stride_arg = materialize_stride_arg(dst, dtype);
+      std::string src0_stride_arg = materialize_stride_arg(src0, dtype);
       this->PrintIndent();
       this->stream << "scalar_t " << dst << "_scalar_" << dtype << " = {.f32 = " << "(float)" << value << "};\n";
       this->PrintIndent();
       // x_neg_scalar_DT_BFP16 = tpu_cast(x_neg_scalar_DT_BFP16, DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);
       this->stream << dst << "_scalar_" << dtype << " = tpu_cast(" << dst << "_scalar_" << dtype << ", " << dtype << ", DT_FP32, RM_HALF_TO_EVEN);\n";
       this->PrintIndent();
-      this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), " <<  dtype << ");\n";
+      this->stream << op_name << "( " << dst << ".addr, " << src0 << ".addr, " <<  dst << "_scalar_" << dtype << ", " << "&" << dst << ".shape, " << dst_stride_arg << ", " << src0_stride_arg << ", " <<  dtype << ");\n";
+      this->EndScope(sid);
       this->PrintIndent();
       this->stream << "}\n";
     }
@@ -1429,63 +1479,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       }
 
       this->PrintIndent();
-      this->stream << "if (align_w > " << input_tensor
-                   << ".shape.w && align_w == eu_num) {\n";
+      this->stream << "if (align_w > " << input_tensor << ".shape.w) {\n";
       this->PrintIndent();
-      this->stream << "  dim4 padded_stride = {" << stride_n
-                   << ", align_w, align_w, 1};\n";
-      this->PrintIndent();
-      this->stream << "  dim4 padded_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, align_w};\n";
-      this->PrintIndent();
-      this->stream << "  dim4 copy_shape = {" << input_tensor << ".shape.n, "
-                   << input_tensor << ".shape.c, 1, " << input_tensor
-                   << ".shape.w};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info padded_input = {.shape = "
-                   << "padded_shape, .stride = padded_stride, .addr = "
-                   << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info input_copy = {.shape = copy_shape, "
-                   << ".stride = {0}, .addr = " << input_tensor
-                   << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info padded_input_copy = {.shape = "
-                   << "copy_shape, .stride = padded_stride, .addr = "
-                   << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = false};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info output_view = {.shape = "
-                   << "out_reduce_w, .stride = {0}, .addr = "
-                   << output_tensor << ".addr, .dtype = " << dtype
-                   << ", .mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_set_C(padded_input.addr, pad_val, "
-                   << "&padded_shape, &padded_input.stride, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_cpy(padded_input_copy.addr, input_copy.addr, "
-                   << "&copy_shape, &padded_input_copy.stride, "
-                   << "(input_copy.default_stride ? NULL : &input_copy.stride), "
-                   << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  dim2 kernel2 = {1, eu_num};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, "
-                   << "padded_input.addr, &padded_shape, &kernel2, &pad, "
-                   << "&stride, &dilation, " << dtype << ", scale);\n";
-      this->PrintIndent();
-      this->stream << "} else {\n";
-
-      this->PrintIndent();
-      this->stream << "  if (align_w > " << input_tensor << ".shape.w) {\n";
-      this->PrintIndent();
-      this->stream << "    dim4 fill_shape = {" << input_tensor << ".shape.n, "
+      this->stream << "  dim4 fill_shape = {" << input_tensor << ".shape.n, "
                    << input_tensor << ".shape.c, 1, align_w - " << input_tensor
                    << ".shape.w};\n";
       this->PrintIndent();
@@ -1505,16 +1501,16 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else {
         LOG(FATAL) << "Unsupported dtype " << dtype_;
       }
-      this->stream << "    int elem_size = " << elem_size << ";\n";
+      this->stream << "  int elem_size = " << elem_size << ";\n";
       this->PrintIndent();
-      this->stream << "    int offset = " << input_tensor
+      this->stream << "  int offset = " << input_tensor
                    << ".shape.w * elem_size;\n";
       this->PrintIndent();
-      this->stream << "    dim4 fill_tensor_stride = {" << stride_n
+      this->stream << "  dim4 fill_tensor_stride = {" << stride_n
                    << ", align_w, " << input_tensor << ".shape.w, 1};\n";
       this->PrintIndent();
       this->stream
-          << "    __ppl_tensor_info fill_tensor = {.shape = fill_shape, .stride "
+          << "  __ppl_tensor_info fill_tensor = {.shape = fill_shape, .stride "
              "= fill_tensor_stride, "
           << ".addr = " << input_tensor << ".addr + offset, .dtype = " << dtype
           << ", "
@@ -1522,54 +1518,52 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           << ".unsigned_flag = 0, .default_stride = false};\n";
       this->PrintIndent();
       this->stream
-          << "    tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
+          << "  tpu_bdc_set_C(fill_tensor.addr, pad_val, &fill_shape, "
           << "(fill_tensor.default_stride ? NULL : &fill_tensor.stride), "
           << dtype << ");\n";
       this->PrintIndent();
-      this->stream << "  }\n";
+      this->stream << "}\n";
 
       this->PrintIndent();
-      this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_h, "
+      this->stream << "__ppl_tensor_info input_view = {.shape = in_reduce_h, "
                       ".stride = {0}, "
                    << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
                    << ", "
                    << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                    << ".unsigned_flag = 0, .default_stride = true};\n";
       this->PrintIndent();
-      this->stream << "  __ppl_tensor_info tmp_view = {.shape = out_reduce_h, "
+      this->stream << "__ppl_tensor_info tmp_view = {.shape = out_reduce_h, "
                       ".stride = {0}, "
                    << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
                    << ", "
                    << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                    << ".unsigned_flag = 0, .default_stride = true};\n";
       this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
+      this->stream << "tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
                       "&input_view.shape, "
                    << "&kernel, &pad, &stride, &dilation, " << dtype
                    << ", scale);\n";
       this->PrintIndent();
-      this->stream << "  dim2 kernel2 = {1, eu_num};\n";
+      this->stream << "dim2 kernel2 = {1, eu_num};\n";
       this->PrintIndent();
-      this->stream << "  __ppl_tensor_info output_view = {.shape = out_reduce_w, "
+      this->stream << "__ppl_tensor_info output_view = {.shape = out_reduce_w, "
                       ".stride = {0}, "
                    << ".addr = " << output_tensor << ".addr, .dtype = " << dtype
                    << ", "
                    << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                    << ".unsigned_flag = 0, .default_stride = true};\n";
       this->PrintIndent();
-      this->stream << "  __ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, "
+      this->stream << "__ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, "
                       ".stride = {0}, "
                    << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
                    << ", "
                    << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                    << ".unsigned_flag = 0, .default_stride = true};\n";
       this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
+      this->stream << "tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
                       "&tmp_view2.shape, "
                    << "&kernel2, &pad, &stride, &dilation, " << dtype
                    << ", scale);\n";
-      this->PrintIndent();
-      this->stream << "}\n";
 
       // 结束块作用域
       this->EndScope(sid);
