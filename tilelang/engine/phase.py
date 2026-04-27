@@ -32,7 +32,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
     # Try to vectorize loop with dynamic shape
-    # mod = tilelang.transform.LoopVectorizeDynamic()(mod)
+    mod = tilelang.transform.LoopVectorizeDynamic()(mod)
 
     return mod
 

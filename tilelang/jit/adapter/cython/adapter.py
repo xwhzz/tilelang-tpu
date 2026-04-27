@@ -212,24 +212,34 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
-            # TODO: 暂时使用ctypes，后续考虑更高效cython
+            # Build mapping from PrimFunc param index to input arg index
+            input_param_indices = [i for i in range(len(self.params))
+                                   if i not in self.result_idx]
             def lambda_forward(*args):
-                # for i, arg in enumerate(args):
-                #     print(f"参数 {i}: shape = {arg.shape}, dtype = {arg.dtype}")
                 args1 = [bytes(arg.cpu().untyped_storage()) for arg in args]
-                argc = len(args)+1
-                
-                args2= [ctypes.c_char_p(arg) for arg in args1]
-                args2 = [b"./main"]+args2
+
+                # Append dynamic shape dimension values
+                shape_values = []
+                for sym_name, (buf_idx, dim_idx) in self.dynamic_symbolic_map.items():
+                    try:
+                        arg_idx = input_param_indices.index(buf_idx)
+                    except ValueError:
+                        continue  # buf_idx is an output param, skip
+                    shape_values.append(str(args[arg_idx].shape[dim_idx]).encode())
+
+                argc = len(args) + 1 + len(shape_values)
+
+                args2 = [ctypes.c_char_p(arg) for arg in args1]
+                args2 = [b"./main"] + args2 + [ctypes.c_char_p(v) for v in shape_values]
                 argv = (ctypes.c_char_p * argc)()
                 argv[:] = args2
                 argc = len(argv)
-                ret=self.lib.main(argc, argv)
+                ret = self.lib.main(argc, argv)
                 args_list = list(args)
                 for i in self.result_idx:
                     tensor = torch.frombuffer(args1[i], dtype=args[i].dtype)
-                    tensor = tensor.reshape(args[i].shape)              
-                    args_list[i][...]=tensor
+                    tensor = tensor.reshape(args[i].shape)
+                    args_list[i][...] = tensor
 
                 return ret
             self.func = lambda_forward

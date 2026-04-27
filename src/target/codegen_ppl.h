@@ -108,8 +108,8 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<std::string, std::string> parameter_map;
-  std::unordered_map<std::string, std::vector<int>> buffer_shape;
-  std::unordered_map<std::string, std::vector<int>> buffer_stride;
+  std::unordered_map<std::string, std::vector<PrimExpr>> buffer_shape;
+  std::unordered_map<std::string, std::vector<PrimExpr>> buffer_stride;
   std::unordered_map<const VarNode *, std::vector<std::string>>
       local_buffer_name_map;
 

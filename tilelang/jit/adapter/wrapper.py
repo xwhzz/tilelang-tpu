@@ -673,6 +673,21 @@ class TLTPUSourceWrapper(object):
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
         self.function_args = function_args
+
+    def get_dynamic_dim_names(self):
+        """Collect unique dynamic (tir.Var) dimension names from buffer shapes."""
+        dynamic_dims = []
+        seen = set()
+        for param in self.prim_func.params:
+            if param in self.prim_func.buffer_map:
+                buffer = self.prim_func.buffer_map[param]
+                for dim in buffer.shape:
+                    if isinstance(dim, tvm.tir.Var):
+                        name = dim.name
+                        if name not in seen:
+                            seen.add(name)
+                            dynamic_dims.append(name)
+        return dynamic_dims
     
     def write_kernel_c(self):
         with open(f"{get_tpu_template_dir()}/kernel.c",'w') as f:
@@ -680,64 +695,83 @@ class TLTPUSourceWrapper(object):
 
     def create_kernel_header(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
-        
+        dynamic_dims = self.get_dynamic_dim_names()
+
         template_file = get_tpu_template_dir() + "/kernel_template.h"
         output_file = get_tpu_template_dir() + "/kernel.h"
-        with open(template_file, "r") as f: 
+        with open(template_file, "r") as f:
             template_content = f.read()
 
-        # 生成参数相关的内容
+        # Generate parameter-related content
         param_names = [f"ptr_v{i+1}" for i in range(num_params)]
-        
-        # 结构体成员
-        struct_members = "\n  ".join([f"unsigned long long {name};" for name in param_names])
-        
-        # 函数参数
-        func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
-        struct_params = ", ".join([f"unsigned long long {name}" for i, name in enumerate(param_names)])
-        
-        
+
+        # Struct members: data pointers + dynamic shape ints
+        struct_lines = [f"unsigned long long {name};" for name in param_names]
+        for d in dynamic_dims:
+            struct_lines.append(f"int {d};")
+        struct_members = "\n  ".join(struct_lines)
+
+        # Function parameters: data pointers + dynamic shape ints
+        func_lines = [f"unsigned long long {name}" for name in param_names]
+        for d in dynamic_dims:
+            func_lines.append(f"int {d}")
+        func_params = ", ".join(func_lines)
+        struct_params = ", ".join(func_lines)
+
         content = template_content.format(
                     struct_members=struct_members,
                     function_name=function_name,
                     func_params=func_params,
                     struct_params=struct_params
                 )
-        
+
         with open(output_file, 'w') as f:
             f.write(content)
         
 
     def create_kernel_cpp(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
+        dynamic_dims = self.get_dynamic_dim_names()
         template_file = get_tpu_template_dir() + "/kernel_template.cpp"
         output_file = get_tpu_template_dir() + "/kernel.cpp"
-        with open(template_file, "r") as f: 
+        with open(template_file, "r") as f:
             template_content = f.read()
-        
-        # 生成参数相关的内容
+
+        # Generate parameter-related content
         param_names = [f"ptr_v{i+1}" for i in range(num_params)]
-        func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
-        struct_assignments = "\n  ".join([f"api.{name} = {name};" for name in param_names])
-        
-        # 格式化内容
+
+        # Function params: data pointers + dynamic shape ints
+        func_lines = [f"unsigned long long {name}" for name in param_names]
+        for d in dynamic_dims:
+            func_lines.append(f"int {d}")
+        func_params = ", ".join(func_lines)
+
+        # Struct assignments: data pointers + dynamic shape ints
+        assign_lines = [f"api.{name} = {name};" for name in param_names]
+        for d in dynamic_dims:
+            assign_lines.append(f"api.{d} = {d};")
+        struct_assignments = "\n  ".join(assign_lines)
+
         formatted_content = template_content.format(
             function_name=function_name,
             func_params=func_params,
             struct_assignments=struct_assignments
         )
-        
+
         with open(output_file, 'w') as f:
             f.write(formatted_content)
         
 
     def create_main_cpp(self, function_name: str = "main_kernel"):
+        dynamic_dims = self.get_dynamic_dim_names()
+        num_data_args = len(self.function_args)
+
         template_file = get_tpu_template_dir() + "/main_template.cpp"
         output_file = get_tpu_template_dir() + "/main.cpp"
-        with open(template_file, "r") as f: 
+        with open(template_file, "r") as f:
             template_content = f.read()
-        
-        # 生成各个代码段
+
+        # Generate code segments
         arg_declarations = []
         device_declarations = []
         malloc_statements = []
@@ -745,27 +779,36 @@ class TLTPUSourceWrapper(object):
         memcpy_d2s_statements = []
         free_statements = []
         kernel_call_args = []
-        
+
+        # Parse dynamic shape values from argv (they come after data pointers)
+        for di, dname in enumerate(dynamic_dims):
+            arg_declarations.append(
+                f'  int {dname} = atoi(argv[{1 + num_data_args + di}]);')
+
         for i, arg in enumerate(self.function_args):
             arg_name = arg["name"]
             data_size = " * ".join([str(dim) for dim in arg["shape"]]) + f" * sizeof({arg['type']})"
-            
+
             arg_declarations.append(f'  char* {arg_name} = argv[{i + 1}];')
             arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
             device_declarations.append(f'  void *dev_{arg_name};')
             malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')
             memcpy_s2d_statements.append(f'  tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size);')
-            
+
             if i in self.output_indices:
                 memcpy_d2s_statements.append(f'  tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size);')
-            
+
             free_statements.append(f'  tpuRtFree(&dev_{arg_name}, 0);')
             kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
-        
+
+        # Include dynamic dims in kernel call
+        for dname in dynamic_dims:
+            kernel_call_args.append(dname)
+
         kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
         pure_kernel_call = f'  rst = {function_name}({", ".join(kernel_call_args)});'
-        
-        # 格式化内容
+
+        # Format content
         formatted_content = template_content.format(
             arg_declarations="\n".join(arg_declarations),
             device_declarations="\n".join(device_declarations),
@@ -776,10 +819,10 @@ class TLTPUSourceWrapper(object):
             kernel_call=kernel_call,
             pure_kernel_call=pure_kernel_call
         )
-        
+
         if output_file is None:
             output_file = f"test_{function_name}.cpp"
-        
+
         with open(output_file, 'w') as f:
             f.write(formatted_content)
         
