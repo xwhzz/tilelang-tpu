@@ -181,6 +181,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
+        self.input_idx = [i for i in range(len(params)) if i not in self.result_idx]
         self.kernel_global_source = kernel_global_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
@@ -212,20 +213,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
-            # Build mapping from PrimFunc param index to input arg index
-            input_param_indices = [i for i in range(len(self.params))
-                                   if i not in self.result_idx]
+            # TODO: 暂时使用ctypes，后续考虑更高效cython
             def lambda_forward(*args):
                 args1 = [bytes(arg.cpu().untyped_storage()) for arg in args]
 
-                # Append dynamic shape dimension values
                 shape_values = []
-                for sym_name, (buf_idx, dim_idx) in self.dynamic_symbolic_map.items():
-                    try:
-                        arg_idx = input_param_indices.index(buf_idx)
-                    except ValueError:
-                        continue  # buf_idx is an output param, skip
-                    shape_values.append(str(args[arg_idx].shape[dim_idx]).encode())
+                for buf_idx, dim_idx in self.dynamic_symbolic_map.values():
+                    if buf_idx in self.input_idx:
+                        arg_pos = self.input_idx.index(buf_idx)
+                        shape_values.append(str(args[arg_pos].shape[dim_idx]).encode())
 
                 argc = len(args) + 1 + len(shape_values)
 
