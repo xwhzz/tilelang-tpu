@@ -2,15 +2,11 @@
 # Licensed under the MIT License.
 
 import math
-import os
 
 import tilelang
 import tilelang.language as T
 import torch
 import torch.nn.functional as F
-from tilelang.jit.adapter.utils import get_tpu_template_dir
-from tilelang.jit.adapter.wrapper import TLWrapper
-from tilelang.utils.target import determine_target
 
 T.copy = T.ppl_copy
 
@@ -163,40 +159,14 @@ is_causal = False
 num_stages = 1
 threads = 16
 
-prim_func = flashattn(
-    batch=batch,
-    heads=heads,
-    seq_len=seq_len,
-    dim=dim,
-    is_causal=is_causal,
-)(block_M, block_N, num_stages, threads)
-
-if os.environ.get("TILELANG_TPU_GENERATE_ONLY") == "1":
-    target = tilelang.tvm.target.Target(determine_target("tpu"))
-    with tilelang.tvm.transform.PassContext(opt_level=3):
-        artifact = tilelang.lower(
-            prim_func,
-            target=target,
-            enable_host_codegen=False,
-            enable_device_compile=False,
-        )
-
-    wrapper = TLWrapper(target)
-    wrapper.assign_optimized_module(tilelang.tvm.IRModule({prim_func.attrs["global_symbol"]: prim_func}))
-    wrapper.assign_host_module(artifact.host_mod)
-    wrapper.assign_device_module(artifact.device_mod)
-    wrapper.assign_output_indices([3])
-    wrapper.assign_pass_configs(None)
-    wrapper.wrap(artifact.kernel_source)
-
-    tpu_template_dir = get_tpu_template_dir()
-    print(f"generated: {tpu_template_dir}/kernel.c")
-    print(f"generated: {tpu_template_dir}/kernel.cpp")
-    print(f"generated: {tpu_template_dir}/main.cpp")
-    raise SystemExit(0)
-
 kernel = tilelang.compile(
-    prim_func,
+    flashattn(
+        batch=batch,
+        heads=heads,
+        seq_len=seq_len,
+        dim=dim,
+        is_causal=is_causal,
+    )(block_M, block_N, num_stages, threads),
     out_idx=-1,
     target="tpu",
 )

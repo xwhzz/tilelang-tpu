@@ -768,7 +768,7 @@ class TLTPUSourceWrapper(object):
                 size_suffix = f" * sizeof({arg['type']})"
             data_size = " * ".join([str(dim) for dim in arg["shape"]]) + size_suffix
             
-            arg_declarations.append(f'  char* {arg_name} = argv[{i + 1}];')
+            arg_declarations.append(f'  char* {arg_name} = static_cast<char*>(args[{i}]);')
             arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
             device_declarations.append(f'  void *dev_{arg_name};')
             malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')

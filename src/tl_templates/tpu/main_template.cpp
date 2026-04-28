@@ -1,6 +1,7 @@
 #include <tpuv7_rt.h>
 #include "host_test_utils.h"
 #include "kernel.h"
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -35,7 +36,7 @@ void post(){{
   tpuRtStreamDestroy(stream);
 }}
 
-int main(int argc, char** argv) {{
+extern "C" int tilelang_tpu_run(void** args) {{
 {arg_declarations}
 
   int res = init();
@@ -114,6 +115,7 @@ int main(int argc, char** argv) {{
   
   // 拷贝输出数据回主机
 {memcpy_d2s_statements}
+  tpuRtStreamSynchronize(stream);
 
   // 释放设备内存
 {free_statements}
