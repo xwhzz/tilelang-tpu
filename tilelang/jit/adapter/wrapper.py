@@ -674,20 +674,16 @@ class TLTPUSourceWrapper(object):
                     f"Parameter {param} is not in the buffer map of the primary function.")
         self.function_args = function_args
 
-    def get_dynamic_dim_names(self):
-        """Collect unique dynamic (tir.Var) dimension names from buffer shapes."""
-        dynamic_dims = []
-        seen = set()
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
+    def get_dynamic_symbolic_set(self, prim_func):
+        # Determine the set of dynamic symbols used in the function
+        dynamic_symbolic_set: List[str] = []
+        for param in prim_func.params:
+            if param in prim_func.buffer_map:
+                buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tir.Var):
-                        name = dim.name
-                        if name not in seen:
-                            seen.add(name)
-                            dynamic_dims.append(name)
-        return dynamic_dims
+                    if isinstance(dim, tvm.tir.Var) and (dim.name not in dynamic_symbolic_set):
+                        dynamic_symbolic_set.append(dim.name)
+        return dynamic_symbolic_set
     
     def write_kernel_c(self):
         with open(f"{get_tpu_template_dir()}/kernel.c",'w') as f:
@@ -695,7 +691,7 @@ class TLTPUSourceWrapper(object):
 
     def create_kernel_header(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
-        dynamic_dims = self.get_dynamic_dim_names()
+        dynamic_dims = self.get_dynamic_symbolic_set(self.prim_func)
 
         template_file = get_tpu_template_dir() + "/kernel_template.h"
         output_file = get_tpu_template_dir() + "/kernel.h"
@@ -731,7 +727,7 @@ class TLTPUSourceWrapper(object):
 
     def create_kernel_cpp(self, function_name: str = "main_kernel"):
         num_params = len(self.function_args)
-        dynamic_dims = self.get_dynamic_dim_names()
+        dynamic_dims = self.get_dynamic_symbolic_set(self.prim_func)
         template_file = get_tpu_template_dir() + "/kernel_template.cpp"
         output_file = get_tpu_template_dir() + "/kernel.cpp"
         with open(template_file, "r") as f:
@@ -763,7 +759,7 @@ class TLTPUSourceWrapper(object):
         
 
     def create_main_cpp(self, function_name: str = "main_kernel"):
-        dynamic_dims = self.get_dynamic_dim_names()
+        dynamic_dims = self.get_dynamic_symbolic_set(self.prim_func)
         num_data_args = len(self.function_args)
 
         template_file = get_tpu_template_dir() + "/main_template.cpp"
