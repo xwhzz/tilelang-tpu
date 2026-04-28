@@ -627,6 +627,18 @@ class TLTPUSourceWrapper(object):
         "bfloat16": "DT_BFP16",
     }
 
+    _ELEM_BYTES = {
+        "float32": 4,
+        "float16": 2,
+        "bfloat16": 2,
+        "int32": 4,
+        "uint32": 4,
+        "int16": 2,
+        "uint16": 2,
+        "int8": 1,
+        "uint8": 1,
+    }
+
     backend = "tl"
     device_mod: Optional[IRModule] = None
     host_mod: Optional[IRModule] = None
@@ -665,6 +677,7 @@ class TLTPUSourceWrapper(object):
                 function_args.append({
                     "name": buffer.data.name,
                     "type": self._TYPE_MAP[buffer.dtype],
+                    "dtype_str": buffer.dtype,
                     "shape": list(buffer.shape),
                 })
             elif isinstance(param, tvm.tir.Var):
@@ -748,9 +761,14 @@ class TLTPUSourceWrapper(object):
         
         for i, arg in enumerate(self.function_args):
             arg_name = arg["name"]
-            data_size = " * ".join([str(dim) for dim in arg["shape"]]) + f" * sizeof({arg['type']})"
+            elem_bytes = self._ELEM_BYTES.get(arg.get("dtype_str", ""), None)
+            if elem_bytes is not None:
+                size_suffix = f" * {elem_bytes}"
+            else:
+                size_suffix = f" * sizeof({arg['type']})"
+            data_size = " * ".join([str(dim) for dim in arg["shape"]]) + size_suffix
             
-            arg_declarations.append(f'  char* {arg_name} = argv[{i + 1}];')
+            arg_declarations.append(f'  char* {arg_name} = static_cast<char*>(args[{i}]);')
             arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
             device_declarations.append(f'  void *dev_{arg_name};')
             malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')

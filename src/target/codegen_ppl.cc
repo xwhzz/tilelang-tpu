@@ -742,12 +742,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::stringstream src1_stride;
     if (src1_shape[1] == 1 && src0_shape[1] != 1) {
       std::string stride_var = name_supply_->FreshName(src1 + "_stride");
-      // void tpu_aligned_stride(dim4 *stride, int start_idx, const dim4 *shape,
-      // data_type_t dtype) we must construct explicit stride
-      // 1. initialize a dim4 struct
       this->PrintIndent();
       this->stream << "dim4 " << stride_var << ";\n";
-      // 2. call tpu_aligned_stride
       this->PrintIndent();
       this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &" << src1
                    << ".shape, " << dtype << ");\n";
@@ -780,10 +776,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (!has_dtype) {
       dtype = "";
     }
-    this->PrintIndent();
-    int sid = this->BeginScope();
-    this->stream << "{\n";
-    
     std::stringstream src1_stride =
         process_stride(src0_shape, src1_shape, src0, src1, dtype);
     this->PrintIndent();
@@ -794,10 +786,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ".stride), "
                  << "(" << src0 << ".default_stride ? NULL : &" << src0
                  << ".stride), " << src1_stride.str() << dtype << ");\n";
-    
-    this->EndScope(sid);
-    this->PrintIndent();
-    this->stream << "}\n";
   };
   // void tpu_bdc_fp_mul_C(local_addr_t dst_addr, local_addr_t src_addr,
   // scalar_t C, const dim4 *shape, const dim4 *dst_stride, const dim4
@@ -806,7 +794,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
     float value = Downcast<FloatImm>(op->args[3])->value;
-    auto src0_shape = buffer_shape[src0];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
     std::string dtype;
     std::string scalar_type;
@@ -951,12 +938,14 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ", .unsigned_flag = 0, .default_stride = false};\n");
         } else if (src_buffer.scope() == "shared.dyn") {
 
-          inst.push_back(
-              "__ppl_tensor_info " + new_src_var + " = {.shape = " + src_shape +
-              ", .stride = {0}, .addr = " +
-              var_idmap_[src_buffer->data.get()] + ".addr, .dtype = " + dtype +
-              ", .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, "
-              ".default_stride = true};\n");
+          auto parent_var = var_idmap_[src_buffer->data.get()];
+          inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
+                         src_shape + ", .stride = " + parent_var +
+                         ".stride, .addr = " + parent_var +
+                         ".addr, .dtype = " + dtype +
+                         ", .mode = 0, .size = 1, .offset = 0, "
+                         ".unsigned_flag = 0, .default_stride = " + parent_var +
+                         ".default_stride};\n");
         }
         return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
       };
@@ -1032,7 +1021,13 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else if (std::isinf(value)) {
         scalar_value = value > 0 ? "(1.0f / 0.0f)" : "(-1.0f / 0.0f)";
       } else {
-        scalar_value = std::to_string(value);
+        std::ostringstream literal;
+        literal << std::scientific << value;
+        if (dtype == DataType::Float(16) || dtype == DataType::Float(32) ||
+            dtype == DataType::BFloat(16)) {
+          literal << 'f';
+        }
+        scalar_value = literal.str();
       }
       this->PrintIndent();
       this->stream << "{\n";
@@ -1155,18 +1150,12 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "int align_w = " << align_w << ";\n";
 
-      // 创建pad_val
+      // 创建pad_val; FP_NEG_MAX returns the integer bit-pattern of -MAX,
+      // so we must populate the `u32` field to reinterpret the bits,
+      // not the float field which would cast the integer to float.
       this->PrintIndent();
-      std::string scalar_field;
-      if (dtype_ == DataType::Float(16)) {
-        scalar_field = "f16";
-      } else if (dtype_ == DataType::Float(32)) {
-        scalar_field = "f32";
-      } else if (dtype_ == DataType::BFloat(16)) {
-        scalar_field = "bf16";
-      }
-      this->stream << "scalar_t pad_val = {." << scalar_field
-                   << " = FP_NEG_MAX(" << dtype << ")};\n";
+      this->stream << "scalar_t pad_val = {.u32 = FP_NEG_MAX(" << dtype
+                   << ")};\n";
 
       // 创建池化所需的形状
       this->PrintIndent();
@@ -1248,11 +1237,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "} else {\n";
 
-      // 判断是否需要填充 - 只有在宽度不是EU数的倍数时才需要填充
       this->PrintIndent();
       this->stream << "  if (align_w > " << input_tensor << ".shape.w) {\n";
-
-      // 计算填充区域大小和偏移
       this->PrintIndent();
       this->stream << "    dim4 fill_shape = {" << input_tensor << ".shape.n, "
                    << input_tensor << ".shape.c, 1, align_w - " << input_tensor
@@ -1283,7 +1269,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "  }\n";
 
-      // 创建输入和临时视图
       this->PrintIndent();
       this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_h, "
                       ".stride = {0}, "
@@ -1481,7 +1466,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << "&stride, &dilation, " << dtype << ", scale);\n";
       this->PrintIndent();
       this->stream << "} else {\n";
-
       this->PrintIndent();
       this->stream << "  if (align_w > " << input_tensor << ".shape.w) {\n";
       this->PrintIndent();
@@ -1780,7 +1764,10 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
            << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
            << ", .align_mode = 1"
            << ", .size = " << tensor_size
-           << ", .unsigned_flag = 0, .default_stride = true};\n";
+           << ", .unsigned_flag = 0, .default_stride = false};\n";
+    this->PrintIndent();
+    stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid
+           << ".shape, " << op_dtype << ");\n";
     this->buffer_shape[vid] = shapes;
     // store local tensor shape
   }
@@ -2027,8 +2014,10 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   }
   std::string api_name = "tpu_kernel_api_main_inner_args_t";
   this->stream << "} " << api_name << ";\n";
-  this->stream << "void " << "main_kernel(const void * args) {\n"
+  this->stream << "int "
+               << "main_kernel(const void * args) {\n"
                << "  " << api_name << " *api = (" << api_name << "*)args;\n"
+               << "  tpu_initialize();\n"
                << "  " << global_name << "(";
   int name_index = 0;
   int name_len = params_name.size();
@@ -2044,7 +2033,8 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     this->stream << "\n";
     name_index += 1;
   }
-  this->stream << "  tpu_poll();\n}\n";
+  this->stream << "  tpu_poll();\n"
+               << "  return 0;\n}\n";
   this->stream << "TPUKERNEL_FUNC_REGISTER(" << "main_kernel)\n";
 }
 
