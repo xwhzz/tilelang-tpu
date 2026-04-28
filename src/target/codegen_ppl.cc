@@ -754,10 +754,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                                const std::string &src0, const std::string &src1,
                                const std::string &dtype) -> std::stringstream {
     std::stringstream src1_stride;
-    if (src1_shape[1].as<IntImmNode>() &&
-        src1_shape[1].as<IntImmNode>()->value == 1 &&
-        src0_shape[1].as<IntImmNode>() &&
-        src0_shape[1].as<IntImmNode>()->value != 1) {
+    auto* s1_h1 = src1_shape[1].as<IntImmNode>();
+    auto* s0_h1 = src0_shape[1].as<IntImmNode>();
+    if (s1_h1 && s1_h1->value == 1 && s0_h1 && s0_h1->value != 1) {
       std::string stride_var = name_supply_->FreshName(src1 + "_stride");
       // void tpu_aligned_stride(dim4 *stride, int start_idx, const dim4 *shape,
       // data_type_t dtype) we must construct explicit stride
@@ -771,9 +770,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << stride_var << ".w = 0;\n";
       src1_stride << "&" << stride_var << ", ";
-    } else if (src1_shape[1].as<IntImmNode>() && src0_shape[1].as<IntImmNode>() &&
-               src1_shape[1].as<IntImmNode>()->value ==
-               src0_shape[1].as<IntImmNode>()->value) {
+    } else if (s1_h1 && s0_h1 && s1_h1->value == s0_h1->value) {
       src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
                   << ".stride), ";
     }
@@ -1957,12 +1954,6 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     auto buffer_node = buffer_map[v];
     auto shape = buffer_node->shape;
 
-    // Check if any dimension is dynamic (tir::Var, not IntImm)
-    bool any_dynamic = false;
-    for (auto& s : shape) {
-      if (!s.as<IntImmNode>()) { any_dynamic = true; break; }
-    }
-
     std::string shape_s = "{";
     int tensor_size = 1;
     bool can_compute_static_size = true;
@@ -2100,10 +2091,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     else
       this->stream << ",\n    " << all_call_args[ai];
   }
-  if (all_call_args.empty())
-    this->stream << ");\n";
-  else
-    this->stream << ");\n";
+  this->stream << ");\n";
   this->stream << "  tpu_poll();\n}\n";
   this->stream << "TPUKERNEL_FUNC_REGISTER(" << "main_kernel)\n";
 }
