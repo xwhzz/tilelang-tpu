@@ -1,0 +1,98 @@
+"""
+Benchmark: RMSNorm-SplitK FP32 1024x1024 — tilelang (splitk) vs PPL
+SplitK: two-pass K-tiled kernel — blk_k=32 regardless of N, no SRAM overflow.
+"""
+
+import os, sys, torch
+
+BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
+BENCHMARK_ROOT = os.path.dirname(BENCH_DIR)
+sys.path.insert(0, BENCHMARK_ROOT)
+
+import tilelang
+import tilelang.language as T
+
+M, N = 1024, 1024
+BLK_M, BLK_K = 32, 32
+ATOL, RTOL = 1e-2, 1e-2
+
+
+def tl_rmsnorm_splitk(M, N, blk_m, blk_k, dtype="float32"):
+
+    @T.prim_func
+    def main_kernel_inner(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        reciprocal_N = T.float32(1.0 / N)
+        with T.Kernel(T.ceildiv(M, blk_m), is_cpu=True) as (bx,):
+            A_shared = T.alloc_shared((blk_m, blk_k), dtype)
+            A_pow2  = T.alloc_shared((blk_m, blk_k), dtype)
+            A_powsum = T.alloc_shared((blk_m, 1), dtype)
+            A_temp   = T.alloc_shared((blk_m, 1), dtype)
+
+            T.ppl_fill(A_powsum, T.float32(0.0))
+            num_k_step = T.ceildiv(N, blk_k)
+
+            for k in T.Pipelined(num_k_step, num_stages=0):
+                T.ppl_copy(A[bx * blk_m, k * blk_k], A_shared)
+                T.ppl_mul(A_pow2, A_shared, A_shared)
+                T.ppl_reduce_sum(A_pow2, A_temp, dim=1)
+                T.ppl_add(A_powsum, A_powsum, A_temp)
+
+            T.ppl_mul_C(A_powsum, A_powsum, reciprocal_N)
+            T.ppl_add_C(A_powsum, A_powsum, T.float32(1e-12))
+            T.ppl_rsqrt(A_powsum, A_powsum)
+
+            for k in T.Pipelined(num_k_step, num_stages=0):
+                block_k_idx = num_k_step - 1 - k
+                T.ppl_copy(A[bx * blk_m, block_k_idx * blk_k], A_shared)
+                T.ppl_mul(A_shared, A_shared, A_powsum)
+                T.ppl_copy(A_shared, B[bx * blk_m, block_k_idx * blk_k])
+
+    return main_kernel_inner
+
+
+def torch_ref(a, eps=1e-12):
+    return a / torch.sqrt(torch.mean(a * a, dim=1, keepdim=True) + eps)
+
+
+def run_and_check(name, kernel_func, a, ref):
+    b = torch.zeros(M, N, dtype=torch.float32)
+    kernel_func(a, b)
+    correct = torch.allclose(b, ref, atol=ATOL, rtol=RTOL)
+    max_diff = (b - ref).abs().max().item()
+    avg_diff = (b - ref).abs().mean().item()
+    print(f"  [{name}] correct={correct}  max_diff={max_diff:.6f}  avg_diff={avg_diff:.8f}")
+    return correct
+
+
+def main():
+    a = torch.randn(M, N, dtype=torch.float32)
+    ref = torch_ref(a)
+
+    print("=" * 60)
+    print(f"RMSNorm-SplitK FP32  M={M} N={N}  blk_m={BLK_M} blk_k={BLK_K}")
+    print("=" * 60)
+
+    print("\n--- tilelang splitk ---")
+    tl_kernel = tilelang.compile(
+        tl_rmsnorm_splitk(M, N, BLK_M, BLK_K), out_idx=-1, target="tpu")
+    run_and_check("tilelang-splitk", tl_kernel, a, ref)
+
+    print("\n--- PPL ---")
+    try:
+        from ppl_utils import compile_ppl_kernel
+        pl_path = os.path.join(BENCH_DIR, "..", "rmsnorm", "pl", "rmsnorm_fp32_1024x1024.pl")
+        arg_specs = [((M, N), torch.float32), ((M, N), torch.float32)]
+        ppl_forward = compile_ppl_kernel(pl_path, arg_specs, result_idx=[1])
+        run_and_check("PPL", ppl_forward, a, ref)
+    except Exception as e:
+        print(f"  PPL failed: {e}")
+        import traceback; traceback.print_exc()
+
+    print("\n" + "=" * 60)
+
+
+if __name__ == "__main__":
+    main()

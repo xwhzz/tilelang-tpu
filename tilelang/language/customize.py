@@ -297,24 +297,11 @@ def ppl_mul(out, inp1, inp2):
 
 @T.macro
 def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
-    """Compute `exp(out)` in place.
+    """Compute `exp(out)` in place (loads coeff+table each call).
 
-    Args:
-        out: Input/output tile. The result overwrites this buffer.
-        work0: Scratch tile with the same shape as `out`.
-        work1: Scratch tile with the same shape as `out`.
-        coeff: FP32 coefficient buffer, typically shaped like `(64, 32)`.
-        table: FP32 lookup-table buffer, typically shaped like `(64, 192)`.
-
-    Example:
-        `T.ppl_exp2(scores_scale, work0, work1, coeff, table)`
-
-    Notes:
-        Despite the name `ppl_exp2`, this op computes natural exponential
-        `exp(x)`, not `2^x`.
-        `out`, `work0`, `work1`, `coeff`, and `table` should all be allocated
-        by the caller before invoking this macro.
-        The current usage requires FP32 buffers.
+    Despite the name `ppl_exp2`, this op computes natural exponential
+    `exp(x)`, not `2^x`. Use `ppl_exp_load_coeff` + `ppl_exp_compute`
+    to hoist the coeff/table loads outside a loop.
     """
     buffer = out.access_ptr("rw")
     work0ptr = work0.access_ptr("rw")
@@ -322,6 +309,34 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
     coeffptr = coeff.access_ptr("rw")
     tableptr = table.access_ptr("rw")
     T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
+
+
+@T.macro
+def ppl_exp_load_coeff(coeff, table):
+    """Load exp coeff+table into SRAM (call once, outside the inner loop).
+
+    Args:
+        coeff: FP32 coefficient buffer shaped `(64, 32)`.
+        table: FP32 lookup-table buffer shaped `(64, 192)`.
+    """
+    coeffptr = coeff.access_ptr("rw")
+    tableptr = table.access_ptr("rw")
+    T.call_extern("handle", "ppl.exp_load_coeff", coeffptr, tableptr)
+
+
+@T.macro
+def ppl_exp_compute(out, work0, work1, coeff, table):
+    """Compute `exp(out)` in place; coeff+table must already be loaded.
+
+    Call `ppl_exp_load_coeff(coeff, table)` once before entering the loop,
+    then call this macro inside the loop to avoid redundant SRAM loads.
+    """
+    buffer = out.access_ptr("rw")
+    work0ptr = work0.access_ptr("rw")
+    work1ptr = work1.access_ptr("rw")
+    coeffptr = coeff.access_ptr("rw")
+    tableptr = table.access_ptr("rw")
+    T.call_extern("handle", "ppl.exp_compute", buffer, work0ptr, work1ptr, coeffptr, tableptr)
 
 
 # def ppl_exp2(out, block_M, block_N, dtype): # only support FP32

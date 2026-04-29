@@ -1118,6 +1118,30 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << coeff << ".addr, " << table << ".addr, "
                    << "&" << src0 << ".shape"
                    << ");\n";
+    } else if (op_name == "ppl.exp_load_coeff") {
+      // Load exp coeff+table once (hoisted outside inner loop).
+      // args: (coeff_ptr, table_ptr)
+      auto coeff =
+          var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto table =
+          var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      this->PrintIndent();
+      this->stream << "tpu_bdc_load_fp32_exp_coeff(" << coeff << ".addr);\n";
+      this->PrintIndent();
+      this->stream << "tpu_bdc_load_fp32_exp_table(" << table << ".addr);\n";
+    } else if (op_name == "ppl.exp_compute") {
+      // Compute exp in-place; coeff+table already loaded.
+      // args: (inout_ptr, work0_ptr, work1_ptr, coeff_ptr, table_ptr)
+      auto dst   = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto work0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto work1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto coeff = var_idmap_[op->args[4].as<CallNode>()->args[1].as<VarNode>()];
+      auto table = var_idmap_[op->args[5].as<CallNode>()->args[1].as<VarNode>()];
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp32_exp(" << dst << ".addr, " << dst
+                   << ".addr, " << work0 << ".addr, " << work1 << ".addr, "
+                   << coeff << ".addr, " << table << ".addr, "
+                   << "&" << dst << ".shape);\n";
     } else if (op_name == "ppl.reduce_max") {
       // 提取输入、输出和临时张量
       auto input_tensor =
