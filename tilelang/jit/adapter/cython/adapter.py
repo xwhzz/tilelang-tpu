@@ -213,29 +213,47 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
+            self.lib.tilelang_tpu_run.argtypes = [
+                ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            self.lib.tilelang_tpu_run.restype = ctypes.c_int
             # TODO: 暂时使用ctypes，后续考虑更高效cython
             def lambda_forward(*args):
-                args1 = [bytes(arg.cpu().untyped_storage()) for arg in args]
+                host_tensors = [arg.detach().cpu().contiguous() for arg in args]
+                arg_buffers = []
+                arg_sizes = []
+                for tensor in host_tensors:
+                    storage = tensor.untyped_storage()
+                    nbytes = storage.nbytes()
+                    raw = bytes(storage)
+                    buf = ctypes.create_string_buffer(raw, nbytes)
+                    arg_buffers.append(buf)
+                    arg_sizes.append(nbytes)
 
-                shape_values = []
+                # Collect dynamic shape values from input tensors
+                dyn_vals = []
                 for buf_idx, dim_idx in self.dynamic_symbolic_map.values():
                     if buf_idx in self.input_idx:
                         arg_pos = self.input_idx.index(buf_idx)
-                        shape_values.append(str(args[arg_pos].shape[dim_idx]).encode())
+                        dyn_vals.append(int(args[arg_pos].shape[dim_idx]))
+                if dyn_vals:
+                    dyn_array = (ctypes.c_int * len(dyn_vals))(*dyn_vals)
+                else:
+                    dyn_array = ctypes.POINTER(ctypes.c_int)()  # NULL
 
-                argc = len(args) + 1 + len(shape_values)
+                argv = (ctypes.c_void_p * len(args))()
+                for i, buf in enumerate(arg_buffers):
+                    argv[i] = ctypes.cast(buf, ctypes.c_void_p).value
 
-                args2 = [ctypes.c_char_p(arg) for arg in args1]
-                args2 = [b"./main"] + args2 + [ctypes.c_char_p(v) for v in shape_values]
-                argv = (ctypes.c_char_p * argc)()
-                argv[:] = args2
-                argc = len(argv)
-                ret = self.lib.main(argc, argv)
+                ret = self.lib.tilelang_tpu_run(argv, len(dyn_vals), dyn_array)
                 args_list = list(args)
                 for i in self.result_idx:
-                    tensor = torch.frombuffer(args1[i], dtype=args[i].dtype)
-                    tensor = tensor.reshape(args[i].shape)
-                    args_list[i][...] = tensor
+                    result_tensor = torch.empty(
+                        args[i].shape, dtype=args[i].dtype, device="cpu")
+                    ctypes.memmove(
+                        result_tensor.data_ptr(),
+                        arg_buffers[i],
+                        arg_sizes[i])
+                    args_list[i][...] = result_tensor.to(args_list[i].device)
 
                 return ret
             self.func = lambda_forward

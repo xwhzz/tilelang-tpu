@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import math
@@ -6,13 +6,15 @@ import math
 import tilelang
 import tilelang.language as T
 import torch
+import torch.nn.functional as F
 
 T.copy = T.ppl_copy
+
 
 def flashattn(batch, heads, seq_len, dim, is_causal):
     scale = (1.0 / dim)**0.5
     shape = [batch, seq_len, heads, dim]
-    dtype = "float16"
+    dtype = "bfloat16"
     accum_dtype = "float"
 
     def kernel_func(block_M, block_N, num_stages, threads):
@@ -82,10 +84,6 @@ def flashattn(batch, heads, seq_len, dim, is_causal):
                 acc_o: T.Tensor([block_M, dim], accum_dtype),
                 scores_scale: T.Tensor([block_M, 1], accum_dtype),
         ):
-            # need bdcast
-            # for i, j in T.Parallel(block_M, dim):
-            #     acc_o[i, j] *= scores_scale[i]
-            # bdcast
             T.ppl_mul(acc_o, acc_o, scores_scale)
 
         @T.prim_func
@@ -159,33 +157,41 @@ kernel = tilelang.compile(
     target="tpu",
 )
 
-q = torch.randn(batch, seq_len, heads, dim).half()
-k = torch.randn(batch, seq_len, heads, dim).half()
-v = torch.randn(batch, seq_len, heads, dim).half()
-out = torch.zeros(batch, seq_len, heads, dim).half()
+q = torch.randn(batch, seq_len, heads, dim).bfloat16()
+k = torch.randn(batch, seq_len, heads, dim).bfloat16()
+v = torch.randn(batch, seq_len, heads, dim).bfloat16()
+out = torch.zeros(batch, seq_len, heads, dim).bfloat16()
 
 res = kernel(q, k, v, out)
 print(res)
 print("output:")
 print(out)
 
-q_ref = q.permute(0, 2, 1, 3).float()
-k_ref = k.permute(0, 2, 1, 3).float()
-v_ref = v.permute(0, 2, 1, 3).float()
-scores = torch.matmul(q_ref, k_ref.transpose(-1, -2)) * (1.0 / math.sqrt(dim))
-if is_causal:
-    causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=scores.device, dtype=torch.bool), diagonal=1)
-    scores = scores.masked_fill(causal_mask, float("-inf"))
-ref = torch.matmul(torch.softmax(scores, dim=-1), v_ref).permute(0, 2, 1, 3).half()
 
-print("ref")
+def ref_program(Q, K, V, is_causal):
+    dim = Q.size(-1)
+    scores = torch.einsum('bqhd,bkhd->bhqk', Q.float(), K.float())
+    scores = scores / math.sqrt(dim)
+    if is_causal:
+        seq_len = Q.size(1)
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
+        mask = mask.unsqueeze(0).unsqueeze(0)
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+    attention_weights = F.softmax(scores, dim=-1)
+    output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V.float())
+    return output.bfloat16()
+
+
+ref = ref_program(q, k, v, is_causal)
+print("ref:")
 print(ref)
+
 diff = ref.float() - out.float()
 max_diff = torch.max(torch.abs(diff))
-avg_diff = torch.mean(diff)
+avg_diff = torch.mean(torch.abs(diff))
 
 print(f"\n=== 差异分析 ===")
 print(f"最大差异: {max_diff}")
 print(f"平均差异: {avg_diff}")
 print("check close:")
-print(torch.allclose(out.float(), ref.float(), atol=1e-2, rtol=1e-2))
+print(torch.allclose(out.float(), ref.float(), atol=5e-2, rtol=5e-2))
