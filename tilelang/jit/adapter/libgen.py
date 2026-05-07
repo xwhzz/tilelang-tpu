@@ -407,9 +407,9 @@ class LibraryGenerator(object):
         {OUTPUT_PATH}/kernel_cpp.o \
         {OUTPUT_PATH}/main_cpp.o \
         -o {OUTPUT_PATH}/main.so \
-        -L{PPL_TOP}/runtime/{CHIP}/lib \
         -L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
-        -Wl,-rpath,{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
+        -L{PPL_TOP}/runtime/{CHIP}/lib \
+        -Wl,--disable-new-dtags,-rpath,{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib:{PPL_TOP}/runtime/{CHIP}/lib \
         -ltpuv7_rt -lcdm_daemon_emulator -lpthread"""
                 
         execute_command(cmd6, "Link main.so lib", timeout)
