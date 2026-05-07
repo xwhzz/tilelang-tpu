@@ -323,6 +323,28 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
     T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
 
 
+@T.macro
+def ppl_sigmoid(out, inp, work0, work1, coeff, table):  # only support FP32
+    outptr = out.access_ptr("rw")
+    inpptr = inp.access_ptr("rw")
+    work0ptr = work0.access_ptr("rw")
+    work1ptr = work1.access_ptr("rw")
+    coeffptr = coeff.access_ptr("rw")
+    tableptr = table.access_ptr("rw")
+    T.call_extern("handle", "ppl.sigmoid", outptr, inpptr, work0ptr, work1ptr, coeffptr, tableptr)
+
+def ppl_gather(output, param, index, param_h):
+    outptr = output.access_ptr("w")
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    return T.call_extern("handle", "ppl.gather", outptr, paramptr, indexptr, param_h)
+    
+def ppl_topk(dst_data, dst_idx, src, K, descended, length):
+    dst_data_ptr = dst_data.access_ptr("w")
+    dst_idx_ptr = dst_idx.access_ptr("w")
+    srcptr = src.access_ptr("r")
+    return T.call_extern("handle", "ppl.topk", dst_data_ptr, dst_idx_ptr, srcptr, K, descended, length)
+
 # def ppl_exp2(out, block_M, block_N, dtype): # only support FP32
 #     buffer = out.access_ptr("rw")
 #     work0 = T.alloc_shared([block_M, block_N], dtype)

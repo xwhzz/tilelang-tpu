@@ -73,6 +73,9 @@ from .customize import (
     ppl_rsqrt,  # noqa: F401
     ppl_add_C,  # noqa: F401
     ppl_rope_add,  # noqa: F401
+    ppl_sigmoid,  # noqa: F401
+    ppl_gather,  # noqa: F401
+    ppl_topk,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
 
