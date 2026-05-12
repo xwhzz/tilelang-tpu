@@ -711,17 +711,64 @@ std::string CodeGenTileLangPPL::GetBufferRef(DataType t,
   return os.str();
 }
 
-// Format a PrimExpr as a C literal fragment. Handles IntImm, tir::Var, and
-// simple Mul (for strides computed by default_stride).
+static std::string FormatCScalarType(DataType dtype) {
+  ICHECK(dtype.is_scalar())
+      << "Only scalar casts are supported in PrimExpr formatting: " << dtype;
+  if (dtype == DataType::Bool()) {
+    return "bool";
+  }
+  if (dtype.is_int()) {
+    if (dtype.bits() <= 32) {
+      return "int";
+    }
+    if (dtype.bits() == 64) {
+      return "int64_t";
+    }
+  }
+  if (dtype.is_uint()) {
+    if (dtype.bits() <= 32) {
+      return "uint32_t";
+    }
+    if (dtype.bits() == 64) {
+      return "uint64_t";
+    }
+  }
+  LOG(FATAL) << "Unsupported cast dtype in PrimExpr formatting: " << dtype;
+  return "";
+}
+
+// Format a PrimExpr as a C literal fragment for generated TPU C code.
 static std::string FormatPrimExpr(const PrimExpr& e) {
   if (auto* imm = e.as<IntImmNode>()) {
     return std::to_string(imm->value);
   } else if (auto* var = e.as<tir::VarNode>()) {
     return var->name_hint;
   } else if (auto* mul = e.as<tir::MulNode>()) {
-    return FormatPrimExpr(mul->a) + " * " + FormatPrimExpr(mul->b);
+    return "(" + FormatPrimExpr(mul->a) + " * " + FormatPrimExpr(mul->b) + ")";
+  } else if (auto* add = e.as<tir::AddNode>()) {
+    return "(" + FormatPrimExpr(add->a) + " + " + FormatPrimExpr(add->b) + ")";
+  } else if (auto* sub = e.as<tir::SubNode>()) {
+    return "(" + FormatPrimExpr(sub->a) + " - " + FormatPrimExpr(sub->b) + ")";
+  } else if (auto* div = e.as<tir::DivNode>()) {
+    return "(" + FormatPrimExpr(div->a) + " / " + FormatPrimExpr(div->b) + ")";
+  } else if (auto* fdiv = e.as<tir::FloorDivNode>()) {
+    // Shape and address expressions are non-negative, so C truncating division
+    // matches TIR floordiv for this codegen path.
+    return "(" + FormatPrimExpr(fdiv->a) + " / " + FormatPrimExpr(fdiv->b) + ")";
+  } else if (auto* mod = e.as<tir::ModNode>()) {
+    return "(" + FormatPrimExpr(mod->a) + " % " + FormatPrimExpr(mod->b) + ")";
+  } else if (auto* fmod = e.as<tir::FloorModNode>()) {
+    return "(" + FormatPrimExpr(fmod->a) + " % " + FormatPrimExpr(fmod->b) + ")";
+  } else if (auto* mn = e.as<tir::MinNode>()) {
+    return "MIN(" + FormatPrimExpr(mn->a) + ", " + FormatPrimExpr(mn->b) + ")";
+  } else if (auto* mx = e.as<tir::MaxNode>()) {
+    return "MAX(" + FormatPrimExpr(mx->a) + ", " + FormatPrimExpr(mx->b) + ")";
+  } else if (auto* cast = e.as<tir::CastNode>()) {
+    return "((" + FormatCScalarType(cast->dtype) + ")" +
+           FormatPrimExpr(cast->value) + ")";
   }
-  LOG(FATAL) << "FormatPrimExpr: unsupported expression type " << e->GetTypeKey();
+  LOG(FATAL) << "FormatPrimExpr: unsupported expression type "
+             << e->GetTypeKey() << ": " << e;
   return "";
 }
 
@@ -880,34 +927,25 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           src_shape[src_shape.size() - 2] = '}';
         }
         std::string dtype;
-        int bytes_size = 0;
+        int bytes_size = src_buffer->dtype.bytes();
         if (src_buffer->dtype == DataType::Float(16)) {
           dtype = "DT_FP16";
-          bytes_size = 2;
         } else if (src_buffer->dtype == DataType::BFloat(16)) {
           dtype = "DT_BFP16";
-          bytes_size = 2;
         } else if (src_buffer->dtype == DataType::Float(32)) {
           dtype = "DT_FP32";
-          bytes_size = 4;
-        } else if (src_buffer->dtype == DataType::UInt(32)){
+        } else if (src_buffer->dtype == DataType::UInt(32)) {
           dtype = "DT_UINT32";
-          bytes_size = 4;
-        }else if (src_buffer->dtype == DataType::Int(32)){
+        } else if (src_buffer->dtype == DataType::Int(32)) {
           dtype = "DT_INT32";
-          bytes_size = 4;
-        } else if (src_buffer->dtype == DataType::UInt(8)){
+        } else if (src_buffer->dtype == DataType::UInt(8)) {
           dtype = "DT_UINT8";
-          bytes_size = 1;
-        } else if (src_buffer->dtype == DataType::Int(8)){
+        } else if (src_buffer->dtype == DataType::Int(8)) {
           dtype = "DT_INT8";
-          bytes_size = 1;
-        } else if (src_buffer->dtype == DataType::UInt(16)){
+        } else if (src_buffer->dtype == DataType::UInt(16)) {
           dtype = "DT_UINT16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::Int(16)){
+        } else if (src_buffer->dtype == DataType::Int(16)) {
           dtype = "DT_INT16";
-          bytes_size = 2;
         } else {
           LOG(FATAL) << "Unsupported dtype " << src_buffer->dtype;
         }
@@ -943,7 +981,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-          std::cout << "min_expr: " << min_expr << std::endl;
           inst.push_back("__ppl_tensor_info " + new_src_var +
                          " = {.shape = " + src_shape +
                          ", .stride = " + src_strides + ", .addr = " + src_id +
@@ -963,10 +1000,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         }
         return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
       };
-      tvm::Dump(op);
       tl::RegionOp src =
           tl::RegionOp(op->args[1].as<CallNode>()->args, buffer_map);
-      // tvm::Dump(src);
       tl::RegionOp dst =
           tl::RegionOp(op->args[2].as<CallNode>()->args, buffer_map);
       auto [src_var_id, src_flag, src_dtype] = process_copy(src);
@@ -1027,7 +1062,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       } else {
         LOG(FATAL) << "Unsupported dtype in ppl.fill: " << dtype;
       }
-      auto addr = buffer_addrs_[var_];
       double value = Downcast<FloatImm>(op->args[2])->value;
       std::string scalar_value;
       if (std::isnan(value)) {
@@ -1844,37 +1878,46 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   bv_shape += FormatPrimExpr(buffer_shape[2]);
   bv_shape += "}";
   std::string op_dtype;
-  int bytes_size = 0;
+  int bytes_size = op->dtype.bytes();
   if (op->dtype == DataType::Float(16)) {
     op_dtype = "DT_FP16";
-    bytes_size = 2;
   } else if (op->dtype == DataType::Float(32)) {
     op_dtype = "DT_FP32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::BFloat(16)){
+  } else if (op->dtype == DataType::BFloat(16)) {
     op_dtype = "DT_BFP16";
-    bytes_size = 2;
-  } else if (op->dtype == DataType::UInt(32)){
+  } else if (op->dtype == DataType::UInt(32)) {
     op_dtype = "DT_UINT32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::Int(32)){
+  } else if (op->dtype == DataType::Int(32)) {
     op_dtype = "DT_INT32";
-    bytes_size = 4;
+  } else {
+    LOG(FATAL) << "Unsupported AllocateNode dtype in PPL codegen: "
+               << op->dtype;
   }
-  auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
+  auto* buffer_num_imm = buffer_shape[0].as<IntImmNode>();
+  ICHECK(buffer_num_imm)
+      << "AllocateNode declaration count must remain static for TPU codegen: "
+      << buffer_shape[0];
+  auto buffer_num = buffer_num_imm->value;
   for (size_t iter{0}; iter < buffer_num; iter++) {
     this->PrintIndent();
-    int tensor_size =
-        shapes[0].as<IntImmNode>()->value * shapes[1].as<IntImmNode>()->value /
-        lane_num * bytes_size;
-    auto addr =
-        f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)).as<IntImmNode>()->value;
-    buffer_addrs_[buffer_var] = addr;
+    PrimExpr elem_count = shapes[0] * shapes[1];
+    PrimExpr tensor_size_expr =
+        floordiv(elem_count, make_const(elem_count.dtype(), lane_num)) *
+        make_const(elem_count.dtype(), bytes_size);
+    PrimExpr tensor_size = arith::Analyzer().Simplify(tensor_size_expr);
+    PrimExpr addr_expr =
+        Downcast<PrimExpr>(f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)));
+    if (auto* imm = addr_expr.as<IntImmNode>()) {
+      buffer_addrs_[buffer_var] = imm->value;
+    } else {
+      buffer_addrs_[buffer_var] = -1;
+    }
     stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape
            << ", .stride = {0}"
-           << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
+           << ", .addr = " << FormatPrimExpr(addr_expr) << ", .dtype = "
+           << op_dtype << ", .mode = 2"
            << ", .align_mode = 1"
-           << ", .size = " << tensor_size
+           << ", .size = " << FormatPrimExpr(tensor_size)
            << ", .unsigned_flag = 0, .default_stride = false};\n";
     this->PrintIndent();
     stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid

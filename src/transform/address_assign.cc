@@ -31,12 +31,19 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/function.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 // #include <map>
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <list>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
@@ -86,6 +93,46 @@ struct OpAddr {
   }
 };
 
+static uint64_t AlignUp(uint64_t x, uint64_t a) {
+  return (x + a - 1) & ~(a - 1);
+}
+
+static PrimExpr Int64Imm(int64_t value) {
+  return make_const(DataType::Int(64), value);
+}
+
+static PrimExpr ToInt64(const PrimExpr &expr) {
+  if (expr.dtype() == DataType::Int(64)) {
+    return expr;
+  }
+  return Cast(DataType::Int(64), expr);
+}
+
+static PrimExpr AlignUpExpr(const PrimExpr &expr, int64_t align,
+                            arith::Analyzer *analyzer) {
+  PrimExpr align_expr = Int64Imm(align);
+  PrimExpr one = Int64Imm(1);
+  PrimExpr aligned =
+      floordiv(ToInt64(expr) + align_expr - one, align_expr) * align_expr;
+  return analyzer->Simplify(aligned);
+}
+
+static PrimExpr BufferSizeBytesExpr(const BufferNode *buffer,
+                                    arith::Analyzer *analyzer) {
+  PrimExpr elem_count = Int64Imm(1);
+  for (const PrimExpr &dim : buffer->shape) {
+    elem_count = elem_count * ToInt64(dim);
+  }
+  PrimExpr size_bytes = elem_count * Int64Imm(buffer->dtype.bytes());
+  size_bytes = max(size_bytes, Int64Imm(64));
+  return AlignUpExpr(analyzer->Simplify(size_bytes), 64, analyzer);
+}
+
+struct SymbolicBufferInfo {
+  const BufferNode *buffer;
+  PrimExpr aligned_size;
+};
+
 class MemAllocBankConflictAware {
 public:
   MemAllocBankConflictAware(int64_t bank_num, int64_t bank_size)
@@ -113,8 +160,6 @@ public:
       int64_t min_conflict_count = std::numeric_limits<int64_t>::max();
       for (int i = 0; i < bank_num_; ++i) {
         int64_t offset = i * bank_size_;
-        // int64_t mem_cross_bank_num = std::ceil(
-        //     static_cast<float>(liveRange[op].tensor_size) / bank_size_);
         uint64_t bytes = liveRange[op].tensor_size;
         int64_t mem_cross_bank_num =
             static_cast<int64_t>((bytes + bank_size_ - 1) / bank_size_);
@@ -136,11 +181,9 @@ public:
         }
       }
       if (!best_addr) {
-        std::cout << "Errrror" << std::endl;
         return false;
       }
       insertAddr(best_addr);
-      // addrMap.Set(op, best_addr->start);
       addrMap[op] = best_addr->start;
     }
     totalSize = total_consumption_;
@@ -187,7 +230,9 @@ protected:
 
     std::shared_ptr<OpAddr> op_addr = std::make_shared<OpAddr>(
         op, liveRange[op].tensor_size, liveRange[op].start, liveRange[op].end);
-    auto align64 = [](int64_t x){ return (x + 63) & ~63; };
+    auto align64 = [](int64_t x) {
+      return static_cast<int64_t>(AlignUp(static_cast<uint64_t>(x), 64));
+    };
     int64_t prev_offset = align64(offset);
     int64_t best_offset = -1;
     int64_t smallest_gap = std::numeric_limits<int64_t>::max();
@@ -227,95 +272,67 @@ protected:
 };
 
 PrimFunc InferAddress(PrimFunc f) {
-  int bank_num = 16, bank_size = 16 * 1024;
+  const int bank_num = 16;
+  const int bank_size = 16 * 1024;
+  std::vector<const BufferNode *> alloc_ops =
+      AddressAllocator().collectAllocOp(f->body);
+
+  arith::Analyzer analyzer;
   std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
       bank_conflict_map;
   std::unordered_map<const BufferNode *, TensorLive> live_ranges;
-  std::vector<const BufferNode *> alloc_ops =
-      AddressAllocator().collectAllocOp(f->body);
-  // for (auto &op : alloc_ops) {
-  //   bank_conflict_map.Set(op, {});
-  // }
-  std::cout << "collect ops num:" << alloc_ops.size() << std::endl;
+  std::vector<const BufferNode *> static_ops;
+  std::vector<SymbolicBufferInfo> symbolic_buffers;
 
   for (auto &op : alloc_ops) {
-    for (auto &op2 : alloc_ops) {
+    PrimExpr aligned_size = BufferSizeBytesExpr(op, &analyzer);
+    if (auto *imm = aligned_size.as<IntImmNode>()) {
+      ICHECK_GE(imm->value, 0)
+          << "AddressAssign inferred a negative buffer size for " << op->name;
+      ICHECK_LE(static_cast<uint64_t>(imm->value),
+                static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
+          << "AddressAssign static buffer size overflows uint32_t for "
+          << op->name;
+      static_ops.push_back(op);
+      // TODO: replace this conservative range with real lifetime analysis.
+      live_ranges[op] = {1, 4, static_cast<uint32_t>(imm->value)};
+    } else {
+      symbolic_buffers.push_back({op, aligned_size});
+    }
+  }
+
+  for (auto &op : static_ops) {
+    for (auto &op2 : static_ops) {
       if (op == op2) {
         continue;
       }
-      auto current_set = bank_conflict_map[op];
-      // current_set.insert(op2);
-      // bank_conflict_map.Set(op, current_set);
       bank_conflict_map[op].insert(op2);
     }
-    auto shape = op->shape;
-    auto dtype = op->dtype;
-
-    // uint32_t op_size = 1;
-    // for (auto s : shape) {
-    //   int ss = s.as<IntImmNode>()->value;
-    //   op_size *= ss;
-    // }
-    // op_size /= bank_num;
-    // int bytes_size = 1;
-    // if (dtype == DataType::Float(16)) {
-    //   bytes_size = 2;
-    // } else if (dtype == DataType::Float(32)) {
-    //   bytes_size = 4;
-    // }
-    // op_size *= bytes_size;
-    // // live_ranges.Set(op, {1, 4, op_size});
-    // live_ranges[op] = {1, 4, op_size};
-
-    auto align_up = [](uint64_t x, uint64_t a) {
-      return (x + a - 1) & ~(a - 1);
-    };
-    uint64_t elem_cnt = 1;
-    for (auto s : shape) {
-      ICHECK(s.as<IntImmNode>())
-          << "Only IntImm shapes are supported in AddressAssign";
-      elem_cnt *= static_cast<uint64_t>(s.as<IntImmNode>()->value);
-    }
-    // 元素字节
-    uint32_t elem_bytes = 1;
-    if (dtype == DataType::Float(16))      elem_bytes = 2;
-    else if (dtype == DataType::BFloat(16))elem_bytes = 2;
-    else if (dtype == DataType::Float(32)) elem_bytes = 4;
-    else if (dtype == DataType::Int(32))   elem_bytes = 4;
-    else if (dtype == DataType::UInt(32))  elem_bytes = 4;
-    else if (dtype == DataType::Int(16))   elem_bytes = 2;
-    else if (dtype == DataType::UInt(16))  elem_bytes = 2;
-    else if (dtype == DataType::Int(8) ||
-            dtype == DataType::UInt(8))   elem_bytes = 1;
-
-    uint64_t size_bytes = elem_cnt * elem_bytes;
-
-    // 至少占 64B，并且 64B 对齐
-    const uint64_t kAlign = 64;
-    size_bytes = std::max<uint64_t>(size_bytes, kAlign);
-    size_bytes = align_up(size_bytes, kAlign);
-
-    // live range 暂时保守写死（后面可改为真实生命周期分析）
-    live_ranges[op] = {1, 4, static_cast<uint32_t>(size_bytes)};
   }
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
   int64_t memUsedWithBC = 0;
   MemAllocBankConflictAware allocatorBC(bank_num, bank_size);
   auto success = allocatorBC.assignAddr(
-      alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
+      static_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
+  ICHECK(success) << "AddressAssign failed to allocate static Local Memory";
 
-  if (success) {
-    // std::unordered_map<String, PrimExpr> result;
-    auto fn = f.CopyOnWrite();
-    auto fn_attr = fn->attrs.CopyOnWrite();
-    for (auto op : alloc_ops) {
-      int32_t address = addrMapWithBC[op];
-      fn_attr->dict.Set(op->name, PrimExpr(address));
-    }
+  auto fn = f.CopyOnWrite();
+  auto fn_attr = fn->attrs.CopyOnWrite();
+  for (auto op : static_ops) {
+    int32_t address = addrMapWithBC[op];
+    fn_attr->dict.Set(op->name, PrimExpr(address));
   }
-  std::cerr << "[AddressAssign] success=" << std::boolalpha << success
-          << " total=" << memUsedWithBC << " bytes\n";
+
+  PrimExpr symbolic_cursor =
+      Int64Imm(AlignUp(static_cast<uint64_t>(memUsedWithBC), 64));
+  for (const SymbolicBufferInfo &info : symbolic_buffers) {
+    PrimExpr addr = analyzer.Simplify(symbolic_cursor);
+    fn_attr->dict.Set(info.buffer->name, addr);
+    symbolic_cursor =
+        AlignUpExpr(analyzer.Simplify(symbolic_cursor + info.aligned_size), 64,
+                    &analyzer);
+  }
 
   return f;
 }

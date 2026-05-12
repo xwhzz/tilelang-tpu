@@ -163,18 +163,22 @@ def ppl_copy(
             return data.shape
         elif isinstance(data, BufferRegion):
             return [x.extent for x in data.region]
-        elif isinstance(data, BufferLoad):
-            print(data.indices)
         else:
             return None
 
-    print(type(src))
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
-    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
-    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    extent = max(src_extent, dst_extent)
+    src_extent = list(src_extent) if src_extent is not None else None
+    dst_extent = list(dst_extent) if dst_extent is not None else None
+    if src_extent is None and dst_extent is None:
+        raise TypeError("Can't deduce ppl_copy extents from args")
+    if src_extent is None:
+        extent = dst_extent
+    elif dst_extent is None:
+        extent = src_extent
+    else:
+        extent = src_extent
 
     def _to_region(data, access_type):
         if isinstance(data, Buffer):
@@ -186,8 +190,6 @@ def ppl_copy(
 
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
-    print(src)
-    print(dst)
     return T.call_extern("handle", "ppl.copy", src, dst)
 
 
