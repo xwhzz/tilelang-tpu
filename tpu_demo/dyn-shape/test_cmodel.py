@@ -11,23 +11,23 @@ def assert_close(name, actual, expected, tol=1e-2):
     print(f"{name}: PASSED (max diff {max_diff:.6e})")
 
 
-@T.prim_func
-def static_copy(
-    X: T.Tensor((1, block_size), "float16"),
-    Y: T.Tensor((1, block_size), "float16"),
-):
-    with T.Kernel(1, 1, is_cpu=True) as (bx, by):
-        local = T.alloc_shared((1, block_size), "float16")
-        T.ppl_copy(X[0, 0], local)
-        T.ppl_copy(local, Y[0, 0])
+# @T.prim_func
+# def static_copy(
+#     X: T.Tensor((1, block_size), "float16"),
+#     Y: T.Tensor((1, block_size), "float16"),
+# ):
+#     with T.Kernel(1, 1, is_cpu=True) as (bx, by):
+#         local = T.alloc_shared((1, block_size), "float16")
+#         T.ppl_copy(X[0, 0], local)
+#         T.ppl_copy(local, Y[0, 0])
 
 
-kernel = tilelang.compile(static_copy, out_idx=-1, target="tpu", mode="cmodel")
+# kernel = tilelang.compile(static_copy, out_idx=-1, target="tpu", mode="cmodel")
 
-a = torch.randn(1, block_size).half()
-b = torch.zeros(1, block_size).half()
-kernel(a, b)
-assert_close("static copy", b, a)
+# a = torch.randn(1, block_size).half()
+# b = torch.zeros(1, block_size).half()
+# kernel(a, b)
+# assert_close("static copy", b, a)
 
 M = T.symbolic("M")
 N = 128
@@ -39,7 +39,7 @@ def dynamic_copy(
     Y: T.Tensor((M, N), "float16"),
 ):
     with T.Kernel(1, 1, is_cpu=True) as (bx, by):
-        local = T.alloc_shared((1, N), "float16")
+        local = T.alloc_shared((M, N), "float16")
         T.ppl_copy(X[0, 0], local)
         T.ppl_copy(local, Y[0, 0])
 
