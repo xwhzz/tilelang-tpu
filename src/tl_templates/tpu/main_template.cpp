@@ -63,7 +63,7 @@ extern "C" int tilelang_tpu_run(void** args, int num_dyn_dims, int* dyn_dims) {{
 
   if (rst) {{
     printf("kernel_launch failed\n");
-    return 1;
+    return rst;
   }}
   printf("kernel_launch success\n");
 

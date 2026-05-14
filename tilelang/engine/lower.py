@@ -247,4 +247,4 @@ def lower(
     #     return CompiledArtifact(
     #         host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod)
+    return CompiledArtifact(host_mod, device_mod, params, codegen_mod, optimized_mod=mod)

@@ -167,6 +167,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  host_mod: Optional[tvm.IRModule] = None,
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
+                 optimized_mod: Optional[tvm.IRModule] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
                  mode: Literal["pcie", "cmodel"] = "pcie"):
@@ -183,13 +184,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.result_idx = self._legalize_result_idx(result_idx)
         self.input_idx = [i for i in range(len(params)) if i not in self.result_idx]
         self.kernel_global_source = kernel_global_source
+        self.target = Target.canon_target(determine_target(target))
 
-        if isinstance(func_or_mod, tir.PrimFunc):
+        if is_tpu_target(self.target):
+            self.ir_module = optimized_mod
+        elif isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
-
-        self.target = Target.canon_target(determine_target(target))
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()

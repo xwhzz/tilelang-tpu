@@ -668,6 +668,78 @@ class TLTPUSourceWrapper(object):
         self.lib_code: Optional[str] = self.update_lib_code(source)
 
 
+    def _format_c_scalar_type(self, dtype) -> str:
+        c_types = {
+            "bool": "bool",
+            "int8": "int",
+            "int16": "int",
+            "int32": "int",
+            "int64": "int64_t",
+            "uint8": "uint32_t",
+            "uint16": "uint32_t",
+            "uint32": "uint32_t",
+            "uint64": "uint64_t",
+        }
+        c_type = c_types.get(str(dtype))
+        if c_type is None:
+            raise ValueError(f"Unsupported cast dtype in TPU PrimExpr formatting: {dtype}")
+        return c_type
+
+    def _format_prim_expr(self, expr, symbols, prefix: str = "") -> str:
+        if isinstance(expr, tvm.tir.IntImm):
+            return str(int(expr))
+        if isinstance(expr, tvm.tir.Var):
+            if expr.name not in symbols:
+                raise ValueError(
+                    f"Local Memory expression references dynamic symbol '{expr.name}', "
+                    "but the TPU wrapper does not pass that symbol.")
+            return f"{prefix}{expr.name}"
+
+        fmt = lambda value: self._format_prim_expr(value, symbols, prefix)
+        for node_cls, op in (
+                (tvm.tir.Mul, "*"),
+                (tvm.tir.Add, "+"),
+                (tvm.tir.Sub, "-"),
+                (tvm.tir.Div, "/"),
+                (tvm.tir.FloorDiv, "/"),
+                (tvm.tir.Mod, "%"),
+                (tvm.tir.FloorMod, "%"),
+        ):
+            if isinstance(expr, node_cls):
+                return f"({fmt(expr.a)} {op} {fmt(expr.b)})"
+        if isinstance(expr, tvm.tir.Min):
+            return f"MIN({fmt(expr.a)}, {fmt(expr.b)})"
+        if isinstance(expr, tvm.tir.Max):
+            return f"MAX({fmt(expr.a)}, {fmt(expr.b)})"
+        if isinstance(expr, tvm.tir.Cast):
+            return f"(({self._format_c_scalar_type(expr.dtype)}){fmt(expr.value)})"
+        raise ValueError(f"Unsupported TPU PrimExpr in Local Memory check: {expr}")
+
+    def _get_lm_symbol_set(self):
+        symbols = set(self.get_dynamic_symbolic_set(self.prim_func))
+        for param in self.prim_func.params:
+            if param not in self.prim_func.buffer_map and isinstance(param, tvm.tir.Var):
+                symbols.add(param.name)
+        return symbols
+
+    def _create_lm_check_body(self, symbol_prefix: str = "") -> str:
+        attrs = self.prim_func.attrs
+        if attrs is None or "tl_lm_total_used" not in attrs:
+            raise ValueError("TPU optimized IR is missing tl_lm_total_used.")
+        total_used = self._format_prim_expr(
+            attrs["tl_lm_total_used"],
+            self._get_lm_symbol_set(),
+            symbol_prefix,
+        )
+        return textwrap.dedent(f"""\
+          int64_t __tl_lm_total_used = {total_used};
+          if (__tl_lm_total_used > 262144) {{
+            printf("Local Memory overflow: used %lld bytes, limit 262144 bytes\\n",
+                   (long long)__tl_lm_total_used);
+            return -1;
+          }}
+          return 0;""")
+
     def parse_func_args(self):
         function_args = []
         # Collect function arguments based on primary function's parameters and buffer mappings
@@ -764,7 +836,9 @@ class TLTPUSourceWrapper(object):
         formatted_content = template_content.format(
             function_name=function_name,
             func_params=func_params,
-            struct_assignments=struct_assignments
+            struct_assignments=struct_assignments,
+            check_mem_body=self._create_lm_check_body(),
+            check_mem_s_body=self._create_lm_check_body("api->")
         )
 
         with open(output_file, 'w') as f:

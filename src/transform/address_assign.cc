@@ -333,6 +333,7 @@ PrimFunc InferAddress(PrimFunc f) {
         AlignUpExpr(analyzer.Simplify(symbolic_cursor + info.aligned_size), 64,
                     &analyzer);
   }
+  fn_attr->dict.Set("tl_lm_total_used", analyzer.Simplify(symbolic_cursor));
 
   return f;
 }

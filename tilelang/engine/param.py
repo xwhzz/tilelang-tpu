@@ -107,3 +107,4 @@ class CompiledArtifact:
     kernel_source: str  # Raw source code of the generated kernel
     rt_mod: Optional[
         tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized
+    optimized_mod: Optional[tvm.IRModule] = None  # IR module after target-specific optimization
