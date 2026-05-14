@@ -1626,6 +1626,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         bytes_size = 2;
       }
       this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
       this->stream << "dim4 half_stride;\n";
       this->PrintIndent();
       this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, " << dtype << ");\n";
@@ -1642,6 +1644,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "tpu_bdc_fp_add( " << dst << ".addr, " << even_src0 << ".addr, " << even_src1 << ".addr + " << bytes_size << ", " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
       this->PrintIndent();
       this->stream << "tpu_bdc_fp_add( " << dst << ".addr + " << bytes_size << ", " << odd_src0 << ".addr + " << bytes_size << ", " << odd_src1 << ".addr, " << "&half_shape, " << "&half_stride, " << "&half_stride, " << "&half_stride, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "}\n";
     } else if (op_name == "ppl.gather") {
       auto dst_var   = op->args[1].as<CallNode>()->args[1].as<VarNode>();
       auto param_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
