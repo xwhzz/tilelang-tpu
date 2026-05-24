@@ -939,11 +939,38 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         } else if (src_buffer.scope() == "shared.dyn") {
 
           auto parent_var = var_idmap_[src_buffer->data.get()];
+          std::string min_expr;
+          std::vector<std::string> strides = {
+              parent_var + ".stride.n", parent_var + ".stride.c",
+              parent_var + ".stride.h", parent_var + ".stride.w"};
+          std::vector<int> stride_idx;
+          if (src_ranges.size() == 4) {
+            stride_idx = {0, 1, 2, 3};
+          } else if (src_ranges.size() == 3) {
+            stride_idx = {1, 2, 3};
+          } else if (src_ranges.size() == 2) {
+            stride_idx = {1, 3};
+          } else {
+            LOG(FATAL) << "Unsupported region dims: " << src_ranges.size();
+          }
+          for (int i = 0; i < src_ranges.size(); i++) {
+            auto sr = src_ranges[i];
+            const PrimExpr &e = sr->min;
+            std::string idx_str;
+            if (const RampNode* ramp = e.as<RampNode>()) {
+              idx_str = PrintExpr(ramp->base);
+            } else {
+              idx_str = PrintExpr(e);
+            }
+            min_expr += "(" + idx_str + ") * " + strides[stride_idx[i]] + "+";
+          }
+          min_expr[min_expr.size() - 1] = ' ';
+          min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
                          src_shape + ", .stride = " + parent_var +
                          ".stride, .addr = " + parent_var +
-                         ".addr, .dtype = " + dtype +
-                         ", .mode = 0, .size = 1, .offset = 0, "
+                         ".addr + " + min_expr + ", .dtype = " + dtype +
+                         ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
                          ".unsigned_flag = 0, .default_stride = " + parent_var +
                          ".default_stride};\n");
         }
