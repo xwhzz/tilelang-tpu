@@ -840,6 +840,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           -> std::tuple<std::string, std::string, std::string> {
         auto src_buffer = src.GetBuffer();
         auto src_ranges = src.GetRanges();
+        auto is_local_tensor_scope = [](const std::string &scope) {
+          return scope == "shared.dyn" || scope == "local" ||
+                 scope == "local.fragment";
+        };
 
         auto src_id = var_idmap_[src_buffer->data.get()];
         if (src_id.empty()) {
@@ -936,18 +940,50 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ".addr + " + min_expr + ", .dtype = " + dtype +
                          ", .mode = 2, .size = 1, .offset = " + min_expr +
                          ", .unsigned_flag = 0, .default_stride = false};\n");
-        } else if (src_buffer.scope() == "shared.dyn") {
+        } else if (is_local_tensor_scope(src_buffer.scope())) {
 
           auto parent_var = var_idmap_[src_buffer->data.get()];
+          std::string min_expr;
+          std::vector<std::string> strides = {
+              parent_var + ".stride.n", parent_var + ".stride.c",
+              parent_var + ".stride.h", parent_var + ".stride.w"};
+          std::vector<int> stride_idx;
+          if (src_ranges.size() == 4) {
+            stride_idx = {0, 1, 2, 3};
+          } else if (src_ranges.size() == 3) {
+            stride_idx = {1, 2, 3};
+          } else if (src_ranges.size() == 2) {
+            stride_idx = {1, 3};
+          } else {
+            LOG(FATAL) << "Unsupported region dims: " << src_ranges.size();
+          }
+          for (int i = 0; i < src_ranges.size(); i++) {
+            auto sr = src_ranges[i];
+            const PrimExpr &e = sr->min;
+            std::string idx_str;
+            if (const RampNode* ramp = e.as<RampNode>()) {
+              idx_str = PrintExpr(ramp->base);
+            } else {
+              idx_str = PrintExpr(e);
+            }
+            min_expr += "(" + idx_str + ") * " + strides[stride_idx[i]] + "+";
+          }
+          min_expr[min_expr.size() - 1] = ' ';
+          min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
                          src_shape + ", .stride = " + parent_var +
                          ".stride, .addr = " + parent_var +
-                         ".addr, .dtype = " + dtype +
-                         ", .mode = 0, .size = 1, .offset = 0, "
+                         ".addr + " + min_expr + ", .dtype = " + dtype +
+                         ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
                          ".unsigned_flag = 0, .default_stride = " + parent_var +
                          ".default_stride};\n");
+        } else {
+          LOG(FATAL) << "Unsupported ppl.copy buffer scope: "
+                     << src_buffer.scope();
         }
-        return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
+        return std::make_tuple(new_src_var,
+                               src_buffer.scope() == "global" ? "global" : "local",
+                               dtype);
       };
       tvm::Dump(op);
       tl::RegionOp src =
@@ -976,9 +1012,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           this->stream << i;
         }
       } else {
-        if (src_flag == "global" && dst_flag == "shared.dyn") {
+        if (src_flag == "global" && dst_flag == "local") {
           ppl_inst += "tpu_gdma_cpy_S2L";
-        } else if (src_flag == "shared.dyn" && dst_flag == "global") {
+        } else if (src_flag == "local" && dst_flag == "global") {
           ppl_inst += "tpu_gdma_cpy_L2S";
         } else {
           // local mem -> local mem copy within the same NPU
