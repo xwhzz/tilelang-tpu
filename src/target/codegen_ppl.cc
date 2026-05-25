@@ -840,6 +840,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           -> std::tuple<std::string, std::string, std::string> {
         auto src_buffer = src.GetBuffer();
         auto src_ranges = src.GetRanges();
+        auto is_local_tensor_scope = [](const std::string &scope) {
+          return scope == "shared.dyn" || scope == "local" ||
+                 scope == "local.fragment";
+        };
 
         auto src_id = var_idmap_[src_buffer->data.get()];
         if (src_id.empty()) {
@@ -936,7 +940,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ".addr + " + min_expr + ", .dtype = " + dtype +
                          ", .mode = 2, .size = 1, .offset = " + min_expr +
                          ", .unsigned_flag = 0, .default_stride = false};\n");
-        } else if (src_buffer.scope() == "shared.dyn") {
+        } else if (is_local_tensor_scope(src_buffer.scope())) {
 
           auto parent_var = var_idmap_[src_buffer->data.get()];
           std::string min_expr;
@@ -973,8 +977,13 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
                          ".unsigned_flag = 0, .default_stride = " + parent_var +
                          ".default_stride};\n");
+        } else {
+          LOG(FATAL) << "Unsupported ppl.copy buffer scope: "
+                     << src_buffer.scope();
         }
-        return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
+        return std::make_tuple(new_src_var,
+                               src_buffer.scope() == "global" ? "global" : "local",
+                               dtype);
       };
       tvm::Dump(op);
       tl::RegionOp src =
@@ -1003,9 +1012,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           this->stream << i;
         }
       } else {
-        if (src_flag == "global" && dst_flag == "shared.dyn") {
+        if (src_flag == "global" && dst_flag == "local") {
           ppl_inst += "tpu_gdma_cpy_S2L";
-        } else if (src_flag == "shared.dyn" && dst_flag == "global") {
+        } else if (src_flag == "local" && dst_flag == "global") {
           ppl_inst += "tpu_gdma_cpy_L2S";
         } else {
           // local mem -> local mem copy within the same NPU
