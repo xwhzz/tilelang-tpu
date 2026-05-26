@@ -720,6 +720,50 @@ inline std::string vector2string(const std::vector<int> &vec) {
   return ret;
 }
 
+static inline std::string TargetDTypeName(DataType dtype) {
+  if (dtype == DataType::Float(32)) {
+    return "DT_FP32";
+  } else if (dtype == DataType::Float(16)) {
+    return "DT_FP16";
+  } else if (dtype == DataType::BFloat(16)) {
+    return "DT_BFP16";
+  } else if (dtype.is_e5m2_float8()) {
+    return "DT_FP8E5M2";
+  } else if (dtype.is_e4m3_float8()) {
+    return "DT_FP8E4M3";
+  } else if (dtype == DataType::UInt(32)) {
+    return "DT_UINT32";
+  } else if (dtype == DataType::Int(32)) {
+    return "DT_INT32";
+  } else if (dtype == DataType::UInt(16)) {
+    return "DT_UINT16";
+  } else if (dtype == DataType::Int(16)) {
+    return "DT_INT16";
+  } else if (dtype == DataType::UInt(8)) {
+    return "DT_UINT8";
+  } else if (dtype == DataType::Int(8)) {
+    return "DT_INT8";
+  }
+  LOG(FATAL) << "Unsupported dtype " << dtype;
+  return "DT_FP32";
+}
+
+static inline int TargetDTypeBytes(DataType dtype) {
+  if (dtype == DataType::Float(32) || dtype == DataType::UInt(32) ||
+      dtype == DataType::Int(32)) {
+    return 4;
+  } else if (dtype == DataType::Float(16) ||
+             dtype == DataType::BFloat(16) ||
+             dtype == DataType::UInt(16) || dtype == DataType::Int(16)) {
+    return 2;
+  } else if (dtype.is_e5m2_float8() || dtype.is_e4m3_float8() ||
+             dtype == DataType::UInt(8) || dtype == DataType::Int(8)) {
+    return 1;
+  }
+  LOG(FATAL) << "Unsupported dtype " << dtype;
+  return 0;
+}
+
 static inline const char* AsBDTypeStr(const DataType& dtype_) {
   if (dtype_ == DataType::Float(32)) {
     return "DT_FP32";
@@ -727,6 +771,10 @@ static inline const char* AsBDTypeStr(const DataType& dtype_) {
     return "DT_FP16";
   } else if (dtype_ == DataType::BFloat(16)) {
     return "DT_BFP16";
+  } else if (dtype_.is_e5m2_float8()) {
+    return "DT_FP8E5M2";
+  } else if (dtype_.is_e4m3_float8()) {
+    return "DT_FP8E4M3";
   }
 
   // 其它类型回退为FP32
@@ -765,14 +813,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto src0_shape = buffer_shape[src0];
     auto src1_shape = buffer_shape[src1];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-    std::string dtype;
-    if (dtype_ == DataType::Float(16)) {
-      dtype = "DT_FP16";
-    } else if (dtype_ == DataType::Float(32)) {
-      dtype = "DT_FP32";
-    } else if (dtype_ == DataType::BFloat(16)){
-      dtype = "DT_BFP16";
-    }
+    std::string dtype = TargetDTypeName(dtype_);
     if (!has_dtype) {
       dtype = "";
     }
@@ -869,38 +910,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           src_shape[src_shape.size() - 2] = '}';
         }
-        std::string dtype;
-        int bytes_size = 0;
-        if (src_buffer->dtype == DataType::Float(16)) {
-          dtype = "DT_FP16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::BFloat(16)) {
-          dtype = "DT_BFP16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::Float(32)) {
-          dtype = "DT_FP32";
-          bytes_size = 4;
-        } else if (src_buffer->dtype == DataType::UInt(32)){
-          dtype = "DT_UINT32";
-          bytes_size = 4;
-        }else if (src_buffer->dtype == DataType::Int(32)){
-          dtype = "DT_INT32";
-          bytes_size = 4;
-        } else if (src_buffer->dtype == DataType::UInt(8)){
-          dtype = "DT_UINT8";
-          bytes_size = 1;
-        } else if (src_buffer->dtype == DataType::Int(8)){
-          dtype = "DT_INT8";
-          bytes_size = 1;
-        } else if (src_buffer->dtype == DataType::UInt(16)){
-          dtype = "DT_UINT16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::Int(16)){
-          dtype = "DT_INT16";
-          bytes_size = 2;
-        } else {
-          LOG(FATAL) << "Unsupported dtype " << src_buffer->dtype;
-        }
+        std::string dtype = TargetDTypeName(src_buffer->dtype);
+        int bytes_size = TargetDTypeBytes(src_buffer->dtype);
         if (src_buffer.scope() == "global") {
           std::string src_strides;
 
@@ -1869,24 +1880,8 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   bv_shape += ", 1, ";
   bv_shape += std::to_string(buffer_shape[2].as<IntImmNode>()->value);
   bv_shape += "}";
-  std::string op_dtype;
-  int bytes_size = 0;
-  if (op->dtype == DataType::Float(16)) {
-    op_dtype = "DT_FP16";
-    bytes_size = 2;
-  } else if (op->dtype == DataType::Float(32)) {
-    op_dtype = "DT_FP32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::BFloat(16)){
-    op_dtype = "DT_BFP16";
-    bytes_size = 2;
-  } else if (op->dtype == DataType::UInt(32)){
-    op_dtype = "DT_UINT32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::Int(32)){
-    op_dtype = "DT_INT32";
-    bytes_size = 4;
-  }
+  std::string op_dtype = TargetDTypeName(op->dtype);
+  int bytes_size = TargetDTypeBytes(op->dtype);
   auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
   for (size_t iter{0}; iter < buffer_num; iter++) {
     this->PrintIndent();
@@ -2090,25 +2085,8 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     }
 
     shape_s += "}";
-    std::string dtype;
-    int bytes_size = 0;
-
-    if (buffer_node->dtype == DataType::Float(16)) {
-      dtype = "DT_FP16";
-      bytes_size = 2;
-    } else if (buffer_node->dtype == DataType::Float(32)) {
-      dtype = "DT_FP32";
-      bytes_size = 4;
-    } else if (buffer_node->dtype == DataType::BFloat(16)){
-      dtype = "DT_BFP16";
-      bytes_size = 2;
-    } else if (buffer_node->dtype == DataType::UInt(32)){
-      dtype = "DT_UINT32";
-      bytes_size = 4;
-    } else if (buffer_node->dtype == DataType::Int(32)){
-      dtype = "DT_INT32";
-      bytes_size = 4;
-    }
+    std::string dtype = TargetDTypeName(buffer_node->dtype);
+    int bytes_size = TargetDTypeBytes(buffer_node->dtype);
     tensor_size *= bytes_size;
     std::string inst =
         "__ppl_tensor_info " + rid + " = {.shape = " + shape_s +
