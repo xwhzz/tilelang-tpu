@@ -30,6 +30,8 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "target/source/codegen_c.h"
 
@@ -124,6 +126,7 @@ private:
   int32_t gemm_idx_ = 0;
 
   DictAttrs f_attrs;
+  std::vector<std::pair<tir::Var, Range>> loop_var_ranges_;
 };
 
 } // namespace codegen

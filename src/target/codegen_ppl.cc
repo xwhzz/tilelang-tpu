@@ -27,11 +27,16 @@
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "bm1690_lmem.h"
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
@@ -117,7 +122,10 @@ void CodeGenTileLangPPL::VisitStmt_(const tir::ForNode *op) {
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
   int for_scope = BeginScope();
+  loop_var_ranges_.push_back(
+      {op->loop_var, Range::FromMinExtent(op->min, op->extent)});
   PrintStmt(op->body);
+  loop_var_ranges_.pop_back();
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
@@ -764,6 +772,15 @@ static inline int TargetDTypeBytes(DataType dtype) {
   return 0;
 }
 
+static inline std::string
+Shape4ToDim4Literal(const std::vector<int64_t> &shape) {
+  ICHECK_EQ(shape.size(), 4U);
+  std::ostringstream os;
+  os << "{ " << shape[0] << ", " << shape[1] << ", " << shape[2] << ", "
+     << shape[3] << "}";
+  return os.str();
+}
+
 static inline const char* AsBDTypeStr(const DataType& dtype_) {
   if (dtype_ == DataType::Float(32)) {
     return "DT_FP32";
@@ -877,7 +894,40 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
     if (op_name == "ppl.copy") {
       tl::BufferMap buffer_map;
-      auto process_copy = [&, this](const tl::RegionOp &src)
+      auto check_copy_bounds = [&, this](const tir::Buffer &buffer,
+                                         const Array<Range> &ranges,
+                                         const char *operand_name) {
+        ICHECK_LE(ranges.size(), buffer->shape.size())
+            << "ppl.copy " << operand_name << " rank mismatch: region rank "
+            << ranges.size() << ", buffer rank " << buffer->shape.size();
+        arith::Analyzer analyzer;
+        for (const auto &loop_range : loop_var_ranges_) {
+          analyzer.Bind(loop_range.first, loop_range.second);
+        }
+        size_t dim_offset = buffer->shape.size() - ranges.size();
+        for (size_t i = 0; i < ranges.size(); ++i) {
+          const Range &range = ranges[i];
+          PrimExpr min = analyzer.Simplify(range->min);
+          PrimExpr upper = analyzer.Simplify(range->min + range->extent);
+          PrimExpr shape_dim = buffer->shape[dim_offset + i];
+          bool lower_ok = analyzer.CanProve(
+              min >= make_const(min.dtype(), 0),
+              arith::ProofStrength::kSymbolicBound);
+          bool upper_ok = analyzer.CanProve(
+              upper <= shape_dim, arith::ProofStrength::kSymbolicBound);
+          ICHECK(lower_ok && upper_ok)
+              << "ppl.copy " << operand_name << " region may be out of bounds "
+              << "for buffer " << buffer->name << " at dim "
+              << (dim_offset + i) << ": min=" << min
+              << ", extent=" << range->extent << ", upper=" << upper
+              << ", shape_dim=" << shape_dim
+              << ". PPL copy does not support implicit tail masking; make "
+              << "the tile divide the static shape or add explicit tail "
+              << "handling in the frontend.";
+        }
+      };
+      auto process_copy = [&, this](const tl::RegionOp &src,
+                                    const char *operand_name)
           -> std::tuple<std::string, std::string, std::string> {
         auto src_buffer = src.GetBuffer();
         auto src_ranges = src.GetRanges();
@@ -890,6 +940,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
         if (src_id.empty()) {
           src_id = this->parameter_map[src_buffer->name];
         }
+        check_copy_bounds(src_buffer, src_ranges, operand_name);
         std::string src_shape;
         std::string new_src_var =
             name_supply_->FreshName(src_buffer->data->name_hint);
@@ -1002,8 +1053,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       // tvm::Dump(src);
       tl::RegionOp dst =
           tl::RegionOp(op->args[2].as<CallNode>()->args, buffer_map);
-      auto [src_var_id, src_flag, src_dtype] = process_copy(src);
-      auto [dst_var_id, dst_flag, dst_dtype] = process_copy(dst);
+      auto [src_var_id, src_flag, src_dtype] = process_copy(src, "src");
+      auto [dst_var_id, dst_flag, dst_dtype] = process_copy(dst, "dst");
       std::string ppl_inst;
       if (src_dtype != dst_dtype) {
         // void tpu_bdc_cast(local_addr_t dst_addr, local_addr_t src_addr, const
@@ -1869,38 +1920,30 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   std::string vid = AllocLocalVarID(buffer_var);
   var_idmap_[buffer_var] = vid;
 
-  auto buffer_shape = op->extents;
-  if (buffer_shape.size() == 2)
-    buffer_shape.insert(buffer_shape.begin(), make_const(DataType::Int(32), 1));
-  std::string bv_shape = "{ 1, ";
+  auto shape4 = tl::bm1690::NormalizeLocalShape(op->extents, "PPL codegen");
+  std::string bv_shape = Shape4ToDim4Literal(shape4);
   std::vector<int> shapes;
-  shapes.push_back(buffer_shape[1].as<IntImmNode>()->value);
-  shapes.push_back(buffer_shape[2].as<IntImmNode>()->value);
-  bv_shape += std::to_string(buffer_shape[1].as<IntImmNode>()->value);
-  bv_shape += ", 1, ";
-  bv_shape += std::to_string(buffer_shape[2].as<IntImmNode>()->value);
-  bv_shape += "}";
+  shapes.push_back(static_cast<int>(shape4[1]));
+  shapes.push_back(static_cast<int>(shape4[3]));
   std::string op_dtype = TargetDTypeName(op->dtype);
-  int bytes_size = TargetDTypeBytes(op->dtype);
-  auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
-  for (size_t iter{0}; iter < buffer_num; iter++) {
-    this->PrintIndent();
-    int tensor_size = shapes[0] * shapes[1] / lane_num * bytes_size;
-    auto addr =
-        f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)).as<IntImmNode>()->value;
-    buffer_addrs_[buffer_var] = addr;
-    stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape
-           << ", .stride = {0}"
-           << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
-           << ", .align_mode = 1"
-           << ", .size = " << tensor_size
-           << ", .unsigned_flag = 0, .default_stride = false};\n";
-    this->PrintIndent();
-    stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid
-           << ".shape, " << op_dtype << ");\n";
-    this->buffer_shape[vid] = shapes;
-    // store local tensor shape
-  }
+  int64_t tensor_size =
+      tl::bm1690::TpuAlignSizeBytesFromShape4(shape4, op->dtype);
+  ICHECK_LE(tensor_size, std::numeric_limits<int>::max());
+  this->PrintIndent();
+  auto addr =
+      f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)).as<IntImmNode>()->value;
+  buffer_addrs_[buffer_var] = addr;
+  stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape
+         << ", .stride = {0}"
+         << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
+         << ", .align_mode = 1"
+         << ", .size = " << tensor_size
+         << ", .unsigned_flag = 0, .default_stride = false};\n";
+  this->PrintIndent();
+  stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid
+         << ".shape, " << op_dtype << ");\n";
+  this->buffer_shape[vid] = shapes;
+  // store local tensor shape
 
   this->PrintStmt(op->body);
 
