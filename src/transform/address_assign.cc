@@ -40,6 +40,7 @@
 #include <limits>
 #include <list>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -130,9 +131,15 @@ public:
     std::list<const BufferNode *> op_list;
     std::copy(ops.begin(), ops.end(), std::back_inserter(op_list));
 
-    op_list.sort([&liveRange](const BufferNode *a, const BufferNode *b) {
+    op_list.sort([&liveRange, &conflictMap](const BufferNode *a,
+                                             const BufferNode *b) {
       auto &lhs = liveRange[a];
       auto &rhs = liveRange[b];
+      size_t lhs_degree = conflictMap[a].size();
+      size_t rhs_degree = conflictMap[b].size();
+      if (lhs_degree != rhs_degree) {
+        return lhs_degree > rhs_degree;
+      }
       if (lhs.tensor_size != rhs.tensor_size) {
         return lhs.tensor_size > rhs.tensor_size;
       }
@@ -144,21 +151,22 @@ public:
       if (liveRange[op].tensor_size > mem_size_) {
         return false;
       }
+      int64_t bytes = liveRange[op].tensor_size;
+      int64_t mem_cross_bank_num =
+          static_cast<int64_t>(bm1690::DivUp(bytes, bank_size_));
+      mem_cross_bank_num = std::max<int64_t>(mem_cross_bank_num, 1);
       for (int i = 0; i < bank_num_; ++i) {
         int64_t offset = i * bank_size_;
-        int64_t bytes = liveRange[op].tensor_size;
-        int64_t mem_cross_bank_num =
-            static_cast<int64_t>(bm1690::DivUp(bytes, bank_size_));
-        mem_cross_bank_num = std::max<int64_t>(mem_cross_bank_num, 1);
 
         if (i + mem_cross_bank_num > bank_num_) {
           break;
         }
-        int64_t end_offset = offset + mem_cross_bank_num * bank_size_;
+        int64_t end_offset = std::min(
+            offset + (mem_cross_bank_num + 1) * bank_size_, mem_size_);
         auto op_addr = searchAddr(op, liveRange, offset, end_offset);
 
         // op can insert
-        if (op_addr->start + op_addr->size <= std::min(end_offset, mem_size_)) {
+        if (op_addr->start + op_addr->size <= end_offset) {
           int64_t conf_count =
               getConflictCount(op_addr, liveRange, conflictMap);
           bool better_addr =
@@ -228,6 +236,7 @@ protected:
         op, liveRange[op].tensor_size, liveRange[op].start, liveRange[op].end);
     int64_t prev_offset = AlignUp(offset, bm1690::kTensorAlignBytes);
     int64_t best_offset = -1;
+    int64_t smallest_gap = std::numeric_limits<int64_t>::max();
 
     for (auto &allocated_op_addr : allocated_op_list_) {
       if (allocated_op_addr->end <= offset) {
@@ -240,15 +249,20 @@ protected:
         int64_t candidate =
             AlignUp(prev_offset, bm1690::kTensorAlignBytes);
         int64_t gap = allocated_op_addr->start - candidate;
-        if (gap >= op_addr->size) {
+        if (gap >= op_addr->size && gap < smallest_gap) {
+          smallest_gap = gap;
           best_offset = candidate;
-          break;
         }
         prev_offset = std::max(prev_offset, allocated_op_addr->end);
       }
     }
-    if (best_offset == -1) {
-      best_offset = AlignUp(prev_offset, bm1690::kTensorAlignBytes);
+    int64_t trailing_candidate =
+        AlignUp(prev_offset, bm1690::kTensorAlignBytes);
+    int64_t trailing_gap = end_offset - trailing_candidate;
+    if (trailing_gap >= op_addr->size && trailing_gap < smallest_gap) {
+      best_offset = trailing_candidate;
+    } else if (best_offset == -1) {
+      best_offset = trailing_candidate;
     }
     op_addr->start = best_offset;
     op_addr->end = op_addr->start + op_addr->size;
@@ -262,6 +276,13 @@ protected:
   int64_t bank_num_;
   int64_t bank_size_;
   int64_t mem_size_;
+};
+
+enum class BufferAccessKind {
+  kRead,
+  kWrite,
+  kReadWrite,
+  kConservative,
 };
 
 class BufferUseCollector : public StmtExprVisitor {
@@ -314,17 +335,35 @@ private:
   uint32_t NextLoc() { return ++loc_; }
 
   void FinishCurrentOp() {
-    for (auto lhs : current_op_buffers_) {
-      for (auto rhs : current_op_buffers_) {
-        if (lhs != rhs) {
-          (*conflict_map_)[lhs].insert(rhs);
+    if (!conservative_buffers_.empty()) {
+      for (auto buffer : read_buffers_) {
+        conservative_buffers_.insert(buffer);
+      }
+      for (auto buffer : write_buffers_) {
+        conservative_buffers_.insert(buffer);
+      }
+      for (auto lhs : conservative_buffers_) {
+        for (auto rhs : conservative_buffers_) {
+          if (lhs != rhs) {
+            (*conflict_map_)[lhs].insert(rhs);
+          }
+        }
+      }
+    } else {
+      for (auto lhs : read_buffers_) {
+        for (auto rhs : read_buffers_) {
+          if (lhs != rhs) {
+            (*conflict_map_)[lhs].insert(rhs);
+          }
         }
       }
     }
-    current_op_buffers_.clear();
+    read_buffers_.clear();
+    write_buffers_.clear();
+    conservative_buffers_.clear();
   }
 
-  void MarkUse(const BufferNode *buffer) {
+  void MarkUse(const BufferNode *buffer, BufferAccessKind access_kind) {
     auto it = live_ranges_->find(buffer);
     if (it == live_ranges_->end()) {
       return;
@@ -332,7 +371,21 @@ private:
     if (!inside_op_) {
       current_loc_ = NextLoc();
     } else {
-      current_op_buffers_.insert(buffer);
+      switch (access_kind) {
+      case BufferAccessKind::kRead:
+        read_buffers_.insert(buffer);
+        break;
+      case BufferAccessKind::kWrite:
+        write_buffers_.insert(buffer);
+        break;
+      case BufferAccessKind::kReadWrite:
+        read_buffers_.insert(buffer);
+        write_buffers_.insert(buffer);
+        break;
+      case BufferAccessKind::kConservative:
+        conservative_buffers_.insert(buffer);
+        break;
+      }
     }
     auto &range = it->second;
     if (!seen_buffers_.count(buffer)) {
@@ -345,39 +398,192 @@ private:
     }
   }
 
+  void MarkExprAs(const PrimExpr &expr, BufferAccessKind access_kind) {
+    bool previous_collecting = collecting_operand_;
+    BufferAccessKind previous_access = operand_access_kind_;
+    collecting_operand_ = true;
+    operand_access_kind_ = access_kind;
+    VisitExpr(expr);
+    collecting_operand_ = previous_collecting;
+    operand_access_kind_ = previous_access;
+  }
+
+  bool IsAccessPtrCall(const CallNode *op) const {
+    return op->op.same_as(builtin::tvm_access_ptr());
+  }
+
+  const BufferNode *BufferFromAccessPtr(const CallNode *op) const {
+    if (!IsAccessPtrCall(op) || op->args.size() < 2) {
+      return nullptr;
+    }
+    auto *var = op->args[1].as<VarNode>();
+    if (!var) {
+      return nullptr;
+    }
+    auto it = buffer_var_to_buffer_.find(var);
+    if (it == buffer_var_to_buffer_.end()) {
+      return nullptr;
+    }
+    return it->second;
+  }
+
+  BufferAccessKind AccessKindFromAccessPtr(const CallNode *op) const {
+    if (op->args.size() < 5) {
+      return BufferAccessKind::kConservative;
+    }
+    auto *mask = op->args[4].as<IntImmNode>();
+    if (!mask) {
+      return BufferAccessKind::kConservative;
+    }
+    bool read = (mask->value & 1) != 0;
+    bool write = (mask->value & 2) != 0;
+    if (read && write) {
+      return BufferAccessKind::kReadWrite;
+    }
+    if (read) {
+      return BufferAccessKind::kRead;
+    }
+    if (write) {
+      return BufferAccessKind::kWrite;
+    }
+    return BufferAccessKind::kConservative;
+  }
+
+  void VisitAccessPtrCall(const CallNode *op, BufferAccessKind access_kind) {
+    const BufferNode *buffer = BufferFromAccessPtr(op);
+    if (buffer) {
+      MarkUse(buffer, access_kind);
+    }
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i == 1 || i == 4) {
+        continue;
+      }
+      VisitExpr(op->args[i]);
+    }
+  }
+
+  bool VisitKnownPPLExtern(const CallNode *op) {
+    if (!op->op.same_as(builtin::call_extern()) || op->args.empty()) {
+      return false;
+    }
+    auto *op_name_node = op->args[0].as<StringImmNode>();
+    if (!op_name_node) {
+      return false;
+    }
+    std::string op_name = op_name_node->value;
+    auto mark_arg = [&](size_t index, BufferAccessKind access_kind) {
+      if (index < op->args.size()) {
+        MarkExprAs(op->args[index], access_kind);
+      }
+    };
+
+    OpScope scope(this);
+    if (op_name == "ppl.copy") {
+      mark_arg(1, BufferAccessKind::kRead);
+      mark_arg(2, BufferAccessKind::kWrite);
+    } else if (op_name == "ppl.fill") {
+      mark_arg(1, BufferAccessKind::kWrite);
+    } else if (op_name == "ppl.gemm") {
+      mark_arg(1, BufferAccessKind::kRead);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kWrite);
+    } else if (op_name == "ppl.sub" || op_name == "ppl.mul" ||
+               op_name == "ppl.add" || op_name == "ppl.div") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "ppl.mul_C" || op_name == "ppl.add_C" ||
+               op_name == "ppl.rsqrt") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+    } else if (op_name == "ppl.reduce_sum" ||
+               op_name == "ppl.reduce_max") {
+      mark_arg(1, BufferAccessKind::kRead);
+      mark_arg(2, BufferAccessKind::kWrite);
+      mark_arg(3, BufferAccessKind::kReadWrite);
+    } else if (op_name == "ppl.exp") {
+      for (size_t i = 1; i <= 5; ++i) {
+        mark_arg(i, BufferAccessKind::kConservative);
+      }
+    } else if (op_name == "ppl.sigmoid") {
+      for (size_t i = 1; i <= 6; ++i) {
+        mark_arg(i, BufferAccessKind::kConservative);
+      }
+    } else if (op_name == "ppl.gather") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "ppl.topk") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kWrite);
+      mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "ppl.rope_add") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
+      mark_arg(4, BufferAccessKind::kRead);
+      mark_arg(5, BufferAccessKind::kRead);
+    } else {
+      for (size_t i = 1; i < op->args.size(); ++i) {
+        mark_arg(i, BufferAccessKind::kConservative);
+      }
+    }
+    return true;
+  }
+
   void VisitExpr_(const VarNode *op) {
     auto it = buffer_var_to_buffer_.find(op);
     if (it != buffer_var_to_buffer_.end()) {
-      MarkUse(it->second);
+      MarkUse(it->second, collecting_operand_ ? operand_access_kind_
+                                               : BufferAccessKind::kConservative);
     }
+  }
+
+  void VisitExpr_(const CallNode *op) {
+    if (collecting_operand_) {
+      if (IsAccessPtrCall(op)) {
+        VisitAccessPtrCall(op, operand_access_kind_);
+        return;
+      }
+      StmtExprVisitor::VisitExpr_(op);
+      return;
+    }
+    if (VisitKnownPPLExtern(op)) {
+      return;
+    }
+    if (IsAccessPtrCall(op)) {
+      VisitAccessPtrCall(op, AccessKindFromAccessPtr(op));
+      return;
+    }
+    OpScope scope(this);
+    StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitExpr_(const BufferLoadNode *op) {
     OpScope scope(this);
-    MarkUse(op->buffer.get());
+    MarkUse(op->buffer.get(), BufferAccessKind::kRead);
     StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) {
     OpScope scope(this);
-    MarkUse(op->buffer.get());
+    MarkUse(op->buffer.get(), BufferAccessKind::kWrite);
     StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const CallNode *op) {
-    OpScope scope(this);
-    StmtExprVisitor::VisitExpr_(op);
   }
 
   std::unordered_map<const VarNode *, const BufferNode *> buffer_var_to_buffer_;
   std::unordered_set<const BufferNode *> seen_buffers_;
-  std::unordered_set<const BufferNode *> current_op_buffers_;
+  std::unordered_set<const BufferNode *> read_buffers_;
+  std::unordered_set<const BufferNode *> write_buffers_;
+  std::unordered_set<const BufferNode *> conservative_buffers_;
   std::unordered_map<const BufferNode *, TensorLive> *live_ranges_;
   std::unordered_map<const BufferNode *,
                      std::unordered_set<const BufferNode *>> *conflict_map_;
   uint32_t loc_ = 0;
   uint32_t current_loc_ = 0;
   bool inside_op_ = false;
+  bool collecting_operand_ = false;
+  BufferAccessKind operand_access_kind_ = BufferAccessKind::kConservative;
 };
 
 PrimFunc InferAddress(PrimFunc f) {
@@ -412,8 +618,8 @@ PrimFunc InferAddress(PrimFunc f) {
     auto fn = f.CopyOnWrite();
     auto fn_attr = fn->attrs.CopyOnWrite();
     for (auto op : alloc_ops) {
-      int32_t address = addrMapWithBC[op];
-      fn_attr->dict.Set(op->name, PrimExpr(address));
+      int64_t address = addrMapWithBC[op];
+      fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
     }
   }
   std::cerr << "[AddressAssign] success=" << std::boolalpha << success
