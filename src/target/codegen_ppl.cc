@@ -27,11 +27,7 @@
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
-#include <algorithm>
 #include <cmath>
-#include <cstdint>
-#include <limits>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -122,10 +118,7 @@ void CodeGenTileLangPPL::VisitStmt_(const tir::ForNode *op) {
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
   int for_scope = BeginScope();
-  loop_var_ranges_.push_back(
-      {op->loop_var, Range::FromMinExtent(op->min, op->extent)});
   PrintStmt(op->body);
-  loop_var_ranges_.pop_back();
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
@@ -772,15 +765,6 @@ static inline int TargetDTypeBytes(DataType dtype) {
   return 0;
 }
 
-static inline std::string
-Shape4ToDim4Literal(const std::vector<int64_t> &shape) {
-  ICHECK_EQ(shape.size(), 4U);
-  std::ostringstream os;
-  os << "{ " << shape[0] << ", " << shape[1] << ", " << shape[2] << ", "
-     << shape[3] << "}";
-  return os.str();
-}
-
 static inline const char* AsBDTypeStr(const DataType& dtype_) {
   if (dtype_ == DataType::Float(32)) {
     return "DT_FP32";
@@ -796,6 +780,27 @@ static inline const char* AsBDTypeStr(const DataType& dtype_) {
 
   // 其它类型回退为FP32
   return "DT_FP32";
+}
+
+inline std::vector<int> LowerRegionToDim4(const Array<Range>& ranges) {
+  int rank = ranges.size();
+  ICHECK(rank >= 1 && rank <= 4) << "Only support rank 1 to 4, but got " << rank;
+  std::vector<int> dim4 = {1, 1, 1, 1};
+  if(rank == 1){
+    dim4[3] = ranges[0]->extent.as<IntImmNode>()->value;
+  } else if(rank == 2) {
+    dim4[1] = ranges[0]->extent.as<IntImmNode>()->value;
+    dim4[3] = ranges[1]->extent.as<IntImmNode>()->value;
+  } else if(rank == 3) {
+    dim4[1] = ranges[0]->extent.as<IntImmNode>()->value;
+    dim4[2] = ranges[1]->extent.as<IntImmNode>()->value;
+    dim4[3] = ranges[2]->extent.as<IntImmNode>()->value;
+  } else {
+    for(int i = 0; i < 4; i++){
+      dim4[i] = ranges[i]->extent.as<IntImmNode>()->value;
+    }
+  }
+  return dim4;
 }
 
 void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
@@ -893,83 +898,78 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
   if (op->op.same_as(builtin::call_extern())) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
     if (op_name == "ppl.copy") {
-      tl::BufferMap buffer_map;
-      auto check_copy_bounds = [&, this](const tir::Buffer &buffer,
-                                         const Array<Range> &ranges,
-                                         const char *operand_name) {
-        ICHECK_LE(ranges.size(), buffer->shape.size())
-            << "ppl.copy " << operand_name << " rank mismatch: region rank "
-            << ranges.size() << ", buffer rank " << buffer->shape.size();
-        arith::Analyzer analyzer;
-        for (const auto &loop_range : loop_var_ranges_) {
-          analyzer.Bind(loop_range.first, loop_range.second);
-        }
-        size_t dim_offset = buffer->shape.size() - ranges.size();
-        for (size_t i = 0; i < ranges.size(); ++i) {
-          const Range &range = ranges[i];
-          PrimExpr min = analyzer.Simplify(range->min);
-          PrimExpr upper = analyzer.Simplify(range->min + range->extent);
-          PrimExpr shape_dim = buffer->shape[dim_offset + i];
-          bool lower_ok = analyzer.CanProve(
-              min >= make_const(min.dtype(), 0),
-              arith::ProofStrength::kSymbolicBound);
-          bool upper_ok = analyzer.CanProve(
-              upper <= shape_dim, arith::ProofStrength::kSymbolicBound);
-          ICHECK(lower_ok && upper_ok)
-              << "ppl.copy " << operand_name << " region may be out of bounds "
-              << "for buffer " << buffer->name << " at dim "
-              << (dim_offset + i) << ": min=" << min
-              << ", extent=" << range->extent << ", upper=" << upper
-              << ", shape_dim=" << shape_dim
-              << ". PPL copy does not support implicit tail masking; make "
-              << "the tile divide the static shape or add explicit tail "
-              << "handling in the frontend.";
-        }
-      };
-      auto process_copy = [&, this](const tl::RegionOp &src,
-                                    const char *operand_name)
+      tl::BufferMap buffer_map;  // tensor信息表，保存变量与对应Tensor的映射
+      // 生成shape、stride等底层信息
+      auto process_copy = [&, this](const tl::RegionOp &src)
           -> std::tuple<std::string, std::string, std::string> {
-        auto src_buffer = src.GetBuffer();
-        auto src_ranges = src.GetRanges();
+        auto src_buffer = src.GetBuffer();  // 该区域属于哪个Tensor
+        auto src_ranges = src.GetRanges();  // copy的区域范围
+        // 判断Tensor是不是local/shared memory
         auto is_local_tensor_scope = [](const std::string &scope) {
           return scope == "shared.dyn" || scope == "local" ||
                  scope == "local.fragment";
         };
 
-        auto src_id = var_idmap_[src_buffer->data.get()];
+        auto src_id = var_idmap_[src_buffer->data.get()];  // 获取这个Tensor对应的底层变量名
         if (src_id.empty()) {
           src_id = this->parameter_map[src_buffer->name];
         }
-        check_copy_bounds(src_buffer, src_ranges, operand_name);
         std::string src_shape;
         std::string new_src_var =
-            name_supply_->FreshName(src_buffer->data->name_hint);
+            name_supply_->FreshName(src_buffer->data->name_hint); // 生成新的临时tensor descriptor名字，避免变量冲突
         int i = 0;
-        if (src_ranges.size() == 2) {
-          src_shape =
-              "{1, " +
-              std::to_string(src_ranges[i]->extent.as<IntImmNode>()->value) +
-              ", 1, " +
-              std::to_string(
-                  src_ranges[i + 1]->extent.as<IntImmNode>()->value) +
-              "}";
-        } else if (src_ranges.size() == 4) {
-          src_shape = "{";
-          for (auto &sr : src_ranges) {
-            src_shape +=
-                std::to_string(sr->extent.as<IntImmNode>()->value) + ", ";
-          }
-          src_shape[src_shape.size() - 2] = '}';
-        }
-        std::string dtype = TargetDTypeName(src_buffer->dtype);
-        int bytes_size = TargetDTypeBytes(src_buffer->dtype);
-        if (src_buffer.scope() == "global") {
+
+        auto dim4_shape = LowerRegionToDim4(src_ranges);
+        src_shape = vector2string(dim4_shape);
+        // if (src_ranges.size() == 1) {
+        //   src_shape =
+        //       "{1, 1, 1, " +
+        //       std::to_string(
+        //           src_ranges[i]->extent.as<IntImmNode>()->value) +
+        //       "}";
+        // } else if (src_ranges.size() == 2) {
+        //   src_shape =
+        //       "{1, " +
+        //       std::to_string(src_ranges[i]->extent.as<IntImmNode>()->value) +
+        //       ", 1, " +
+        //       std::to_string(
+        //           src_ranges[i + 1]->extent.as<IntImmNode>()->value) +
+        //       "}";
+        // } else if (src_ranges.size() == 3) {
+        //   src_shape =
+        //       "{1, " +
+        //       std::to_string(src_ranges[i]->extent.as<IntImmNode>()->value) +
+        //       ", " +
+        //       std::to_string(
+        //           src_ranges[i + 1]->extent.as<IntImmNode>()->value) +
+        //       ", " +
+        //       std::to_string(
+        //           src_ranges[i + 2]->extent.as<IntImmNode>()->value) +
+        //       "}";
+        // } else if (src_ranges.size() == 4) {
+        //   src_shape = "{";
+        //   for (auto &sr : src_ranges) {
+        //     src_shape +=
+        //         std::to_string(sr->extent.as<IntImmNode>()->value) + ", ";
+        //   }
+        //   src_shape[src_shape.size() - 2] = '}';
+        // }
+
+        std::string dtype = TargetDTypeName(src_buffer->dtype);  // 获取数据类型
+        int bytes_size = TargetDTypeBytes(src_buffer->dtype);  // 各元素占多少字节
+        if (src_buffer.scope() == "global") {  // Tensor在global memory
           std::string src_strides;
 
-          auto strides = buffer_stride[src_buffer->name];
-          src_strides = vector2string(strides);
-          std::string min_expr;
+          auto strides = buffer_stride[src_buffer->name];// 获取Tensor在内存中的stride
+          if (!strides.empty())
+            src_strides = vector2string(strides);  // 如：[1,256,1,1] → "{1,256,1,1}"
+          else
+            LOG(FATAL) << "buffer_stride not initialized for buffer: " << src_buffer->name;
+          
+          
+          std::string min_expr;  // 计算copy区域的内存偏移地址
           // 根据region的维度，绑定stride的索引
+          // 告诉不同维度应该使用哪个stride
           std::vector<int> stride_idx;
           if (src_ranges.size() == 4) { // N, C, H, W
             stride_idx = {0, 1, 2, 3};
@@ -977,6 +977,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
             stride_idx = {1, 2, 3};
           } else if (src_ranges.size() == 2) { // C, W
             stride_idx = {1, 3};
+          } else if(src_ranges.size() == 1){ // W
+            stride_idx = {3};
           } else {
             LOG(FATAL) << "Unsupported region dims: " << src_ranges.size();
           }
@@ -994,16 +996,18 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                 "(" + idx_str + ") * " + std::to_string(strides[stride_idx[i]]) + "+";
           }
           min_expr[min_expr.size() - 1] = ' ';
-          min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
+          min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);  // 地址偏移是按字节
           std::cout << "min_expr: " << min_expr << std::endl;
+          // 生成copy区域对应的tensor_info
           inst.push_back("__ppl_tensor_info " + new_src_var +
                          " = {.shape = " + src_shape +
                          ", .stride = " + src_strides + ", .addr = " + src_id +
                          ".addr + " + min_expr + ", .dtype = " + dtype +
                          ", .mode = 2, .size = 1, .offset = " + min_expr +
                          ", .unsigned_flag = 0, .default_stride = false};\n");
-        } else if (is_local_tensor_scope(src_buffer.scope())) {
+        } else if (is_local_tensor_scope(src_buffer.scope())) {  //Tensor在local/shared memory
 
+          // local tensor 已经有 tensor_info,因此获取父Tensor info
           auto parent_var = var_idmap_[src_buffer->data.get()];
           std::string min_expr;
           std::vector<std::string> strides = {
@@ -1016,6 +1020,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
             stride_idx = {1, 2, 3};
           } else if (src_ranges.size() == 2) {
             stride_idx = {1, 3};
+          } else if(src_ranges.size() == 1){ // W
+            stride_idx = {3};
           } else {
             LOG(FATAL) << "Unsupported region dims: " << src_ranges.size();
           }
@@ -1053,9 +1059,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       // tvm::Dump(src);
       tl::RegionOp dst =
           tl::RegionOp(op->args[2].as<CallNode>()->args, buffer_map);
-      auto [src_var_id, src_flag, src_dtype] = process_copy(src, "src");
-      auto [dst_var_id, dst_flag, dst_dtype] = process_copy(dst, "dst");
+      auto [src_var_id, src_flag, src_dtype] = process_copy(src);
+      auto [dst_var_id, dst_flag, dst_dtype] = process_copy(dst);
       std::string ppl_inst;
+      // dtype不同，copy同时做类型转换
       if (src_dtype != dst_dtype) {
         // void tpu_bdc_cast(local_addr_t dst_addr, local_addr_t src_addr, const
         // dim4 *shape, const dim4 *dst_stride, const dim4 *src_stride,
@@ -1073,7 +1080,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           this->PrintIndent();
           this->stream << i;
         }
-      } else {
+      } else {  // 普通copy
         if (src_flag == "global" && dst_flag == "local") {
           ppl_inst += "tpu_gdma_cpy_S2L";
         } else if (src_flag == "local" && dst_flag == "global") {
@@ -1083,6 +1090,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           ppl_inst += "tpu_bdc_cpy";
         }
 
+        // 生成真正 TPU 指令
         ppl_inst += "(" + dst_var_id + ".addr, " + src_var_id + ".addr, &" +
                     dst_var_id + ".shape, " + "(" + dst_var_id +
                     ".default_stride ? NULL : &" + dst_var_id + ".stride), " +
@@ -1908,6 +1916,37 @@ std::string CodeGenTileLangPPL::AllocLocalVarID(const tir::VarNode *v) {
   return vid;
 }
 
+
+inline std::vector<int> LowerShapeToDim4(const Array<PrimExpr> &shape) {
+  int rank = shape.size();
+  ICHECK(rank >= 1 && rank <= 4) << "Only support tensor with rank in [1, 4], but got " << rank;
+  std::vector<int> dim4 = {1, 1, 1, 1}; // 初始化为1
+  if(rank == 1){
+    dim4[3] = shape[0].as<IntImmNode>()->value; // N=1, C=1, H=1, W=shape[0]
+  } else if(rank == 2){
+    dim4[1] = shape[0].as<IntImmNode>()->value; // N=1, C=shape[0], H=1, W=shape[1]
+    dim4[3] = shape[1].as<IntImmNode>()->value;
+  } else if(rank == 3){
+    dim4[1] = shape[0].as<IntImmNode>()->value; // N=1, C=shape[0], H=shape[1], W=shape[2]
+    dim4[2] = shape[1].as<IntImmNode>()->value;
+    dim4[3] = shape[2].as<IntImmNode>()->value;
+  } else {
+    for (int i = 0; i < 4; i++) {
+      dim4[i] = shape[i].as<IntImmNode>()->value;
+    }
+  }
+  return dim4;
+}
+
+static inline std::string
+Shape4ToDim4Literal(const std::vector<int64_t> &shape) {
+  ICHECK_EQ(shape.size(), 4U);
+  std::ostringstream os;
+  os << "{ " << shape[0] << ", " << shape[1] << ", " << shape[2] << ", "
+     << shape[3] << "}";
+  return os.str();
+}
+
 void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   const tir::VarNode *buffer_var = op->buffer_var.get();
@@ -2060,6 +2099,7 @@ void CodeGenTileLangPPL::PrintVecElemLoadExpr(DataType t, int i,
   return;
 }
 
+
 void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   ReserveKeywordsAsUnique();
@@ -2072,18 +2112,21 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f, stream);
+  // 获取kernel名
   std::string global_name = static_cast<std::string>(global_symbol.value());
   if (global_name == "main") {
     throw std::runtime_error("Kernel name 'main' is not allowed. Please use 'main_kernel_inner' as the kernel name.");
   }
   this->stream << " " << global_name << "(";
-  std::vector<std::string> params_name;
+  std::vector<std::string> params_name; // 生成参数列表
   // auto bf_map = f->buffer_map;
   std::unordered_map<const tir::VarNode *, std::string> var_global_mem_map;
 
+  //根据shape自动计算contiguous stride
   auto default_stride = [this](const std::string &node) {
     auto buf_shape = buffer_shape[node];
-    buffer_stride[node] = {1, 1, 1, 1};
+    buffer_stride[node] = {1, 1, 1, 1}; // 初始化为1
+    // 倒推
     for (int i = 2; i >= 0; i--) {
       buffer_stride[node][i] = buf_shape[i + 1] * buffer_stride[node][i + 1];
     }
@@ -2096,41 +2139,81 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     std::string rid = "v" + std::to_string(index + 1 + length);
 
     auto buffer_node = buffer_map[v];
-    auto shape = buffer_node->shape;
-
+    auto shape = buffer_node->shape;  // shape处理
     std::string shape_s = "{";
     int tensor_size = 1;
-    if (shape.size() == 2) {
-      buffer_shape[buffer_node->name] = {1, shape[0].as<IntImmNode>()->value, 1,
-                                         shape[1].as<IntImmNode>()->value};
-      default_stride(buffer_node->name);
-      shape_s += "1 ,";
-      shape_s += std::to_string(shape[0].as<IntImmNode>()->value);
-      tensor_size *= shape[0].as<IntImmNode>()->value;
-      shape_s += ", 1, ";
-      shape_s += std::to_string(shape[1].as<IntImmNode>()->value);
-      tensor_size *= shape[1].as<IntImmNode>()->value;
-    } else if (shape.size() == 4) {
-      buffer_shape[buffer_node->name] = {};
-      for (auto s : shape) {
-        buffer_shape[buffer_node->name].push_back(s.as<IntImmNode>()->value);
-      }
-      default_stride(buffer_node->name);
-      // 用下标循环来拼接带逗号的字符串
-      for (size_t i = 0; i < shape.size(); ++i) {
-        int dim_i = shape[i].as<IntImmNode>()->value;
-        shape_s += std::to_string(dim_i);
-        tensor_size *= dim_i;
-        if (i + 1 < shape.size()) {
-          shape_s += ", ";
-        }
+    // 将Tensor的shape信息转换成TPU Runtime能理解的格式（包括shape， stride， tensor size）
+    auto dim4_shape = LowerShapeToDim4(shape);
+    buffer_shape[buffer_node->name] = dim4_shape;
+    default_stride(buffer_node->name); // 自动计算stride
+    for (int i=0; i < 4; i++) {
+      shape_s += std::to_string(dim4_shape[i]);
+      tensor_size *= dim4_shape[i];  
+      if (i < 3) {
+        shape_s += ", ";
       }
     }
-
+    // if (shape.size() == 1) {
+    //   buffer_shape[buffer_node->name] = {1, 1, 1,
+    //                                      shape[0].as<IntImmNode>()->value};
+    //   default_stride(buffer_node->name); 
+    //   shape_s += "1, 1, 1, ";
+    //   shape_s += std::to_string(shape[0].as<IntImmNode>()->value);
+    //   tensor_size *= shape[0].as<IntImmNode>()->value;
+    // } else if (shape.size() == 2) {
+    //   // 扩展成  [N,C,H,W]=[1,H,1,W]
+    //   // .as<IntImmNode>(): 在TVM内部，shape通常是IR节点对象，要将其转换成整数节点
+    //   buffer_shape[buffer_node->name] = {1, shape[0].as<IntImmNode>()->value, 1,
+    //                                      shape[1].as<IntImmNode>()->value};
+    //   default_stride(buffer_node->name); // 自动计算stride
+    //   // 拼接字符串
+    //   // shape_s最终会变成"{1,H,1,W}"，用于生成.shape = {1,H,1,W}
+    //   shape_s += "1 ,";
+    //   shape_s += std::to_string(shape[0].as<IntImmNode>()->value);
+    //   tensor_size *= shape[0].as<IntImmNode>()->value;
+    //   shape_s += ", 1, ";
+    //   shape_s += std::to_string(shape[1].as<IntImmNode>()->value);
+    //   tensor_size *= shape[1].as<IntImmNode>()->value;
+    // } else if (shape.size() == 3) {
+    //   int C = shape[0].as<IntImmNode>()->value;
+    //   int H = shape[1].as<IntImmNode>()->value;
+    //   int W = shape[2].as<IntImmNode>()->value;
+    //   buffer_shape[buffer_node->name] = {1, C, H, W};
+    //   default_stride(buffer_node->name); 
+    //   shape_s += "1, ";
+    //   shape_s += std::to_string(C);
+    //   tensor_size *= C;
+    //   shape_s += ", ";
+    //   shape_s += std::to_string(H);
+    //   tensor_size *= H;
+    //   shape_s += ", ";
+    //   shape_s += std::to_string(W);
+    //   tensor_size *= W;
+    // } else if (shape.size() == 4) {
+    //   // 直接保留
+    //   buffer_shape[buffer_node->name] = {};
+    //   for (auto s : shape) {
+    //     buffer_shape[buffer_node->name].push_back(s.as<IntImmNode>()->value);
+    //   }
+    //   default_stride(buffer_node->name);
+    //   // 用下标循环来拼接带逗号的字符串
+    //   for (size_t i = 0; i < shape.size(); ++i) {
+    //     int dim_i = shape[i].as<IntImmNode>()->value;
+    //     shape_s += std::to_string(dim_i);
+    //     tensor_size *= dim_i;  // 先计算元素个数
+    //     if (i + 1 < shape.size()) {
+    //       shape_s += ", ";
+    //     }
+    //   }
+    // } else{
+    //   LOG(FATAL) << "Unsupported tensor rank: " << shape.size();
+    // }
     shape_s += "}";
+
     std::string dtype = TargetDTypeName(buffer_node->dtype);
     int bytes_size = TargetDTypeBytes(buffer_node->dtype);
     tensor_size *= bytes_size;
+    // 生成_ppl_tensor_info——最重要
     std::string inst =
         "__ppl_tensor_info " + rid + " = {.shape = " + shape_s +
         ", .stride = {0}, .addr = " + vid + ", .dtype = " + dtype +
@@ -2140,7 +2223,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     std::string name_hint = v_node->name_hint;
     this->var_idmap_[v_node] = rid;
 
-    // remove "_handle"
+    // 参数名处理：remove "_handle"
     for (int i{0}; i < 7; i++) {
       name_hint.pop_back();
     }
@@ -2154,28 +2237,33 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     params_name.push_back(vid);
     if (i != 0)
       stream << ", ";
-    stream << restrict_keyword_ << ' ' << vid;
+    stream << restrict_keyword_ << ' ' << vid;  // 输出函数参数
   }
   stream << ") {\n";
 
   this->PreFunctionBody(f); // none
   int func_scope = this->BeginScope();
 
+  // 输出tensor_info
   for (auto [v, inst] : var_global_mem_map) {
     this->PrintIndent();
     this->stream << inst;
   }
+  // 真正生成TIR body
   this->PrintStmt(f->body);
   this->EndScope(func_scope);
   this->PrintIndent();
   this->stream << "}\n\n";
 
+  //生成Runtime Wrapper
+  // TPU runtime接口层
   this->stream << "typedef struct {\n";
   for (auto &name : params_name) {
     this->stream << "  " << restrict_keyword_ << " " << name << ";\n";
   }
   std::string api_name = "tpu_kernel_api_main_inner_args_t";
   this->stream << "} " << api_name << ";\n";
+  // TPU runtime实际调用入口
   this->stream << "int "
                << "main_kernel(const void * args) {\n"
                << "  " << api_name << " *api = (" << api_name << "*)args;\n"
@@ -2186,6 +2274,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   for (auto &name : params_name) {
     if (name_index != 0)
       this->stream << "    ";
+    // 调用真正的kernel
     this->stream << "api->" << name;
 
     if (name_index == name_len - 1)
@@ -2195,8 +2284,10 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     this->stream << "\n";
     name_index += 1;
   }
+  // poll——等待TPU完成
   this->stream << "  tpu_poll();\n"
                << "  return 0;\n}\n";
+  // 注册kernel给runtime
   this->stream << "TPUKERNEL_FUNC_REGISTER(" << "main_kernel)\n";
 }
 
