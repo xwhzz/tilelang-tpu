@@ -3,6 +3,7 @@
 """The language interface for tl programs."""
 
 import tilelang.language as T
+from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, BufferLoad
 from typing import List, Union
 from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
@@ -158,23 +159,40 @@ def ppl_copy(
         slices.
     """
 
+    def _is_one(value):
+        return isinstance(value, int) and value == 1 or (
+            hasattr(value, "value") and value.value == 1)
+
+    def _merge_extent(src_value, dst_value):
+        if _is_one(src_value):
+            return dst_value
+        if _is_one(dst_value):
+            return src_value
+        ir.assert_structural_equal(src_value, dst_value)
+        return src_value
+
     def get_extent(data):
         if isinstance(data, Buffer):
             return data.shape
         elif isinstance(data, BufferRegion):
             return [x.extent for x in data.region]
         elif isinstance(data, BufferLoad):
-            print(data.indices)
+            return [getattr(index, "lanes", 1) for index in data.indices]
         else:
             return None
 
-    print(type(src))
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    extent = max(src_extent, dst_extent)
+    rank = max(len(src_extent), len(dst_extent))
+    src_extent = [1] * (rank - len(src_extent)) + src_extent
+    dst_extent = [1] * (rank - len(dst_extent)) + dst_extent
+    extent = [
+        _merge_extent(src_value, dst_value)
+        for src_value, dst_value in zip(src_extent, dst_extent)
+    ]
 
     def _to_region(data, access_type):
         if isinstance(data, Buffer):
@@ -186,8 +204,6 @@ def ppl_copy(
 
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
-    print(src)
-    print(dst)
     return T.call_extern("handle", "ppl.copy", src, dst)
 
 
