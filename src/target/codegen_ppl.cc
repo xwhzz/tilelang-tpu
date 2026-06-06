@@ -727,6 +727,8 @@ static inline const char* AsBDTypeStr(const DataType& dtype_) {
     return "DT_FP16";
   } else if (dtype_ == DataType::BFloat(16)) {
     return "DT_BFP16";
+  } else if (dtype_ == DataType::Int(8)) {
+    return "DT_INT8";
   }
 
   // 其它类型回退为FP32
@@ -1846,6 +1848,9 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   } else if (op->dtype == DataType::Int(32)){
     op_dtype = "DT_INT32";
     bytes_size = 4;
+  } else if (op->dtype == DataType::Int(8)){
+    op_dtype = "DT_INT8";
+    bytes_size = 1;
   }
   auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
   for (size_t iter{0}; iter < buffer_num; iter++) {
@@ -2068,6 +2073,9 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     } else if (buffer_node->dtype == DataType::Int(32)){
       dtype = "DT_INT32";
       bytes_size = 4;
+    } else if (buffer_node->dtype == DataType::Int(8)){
+      dtype = "DT_INT8";
+      bytes_size = 1;
     }
     tensor_size *= bytes_size;
     std::string inst =
