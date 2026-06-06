@@ -5,9 +5,12 @@
 Uses the fused MLP kernel that performs gate, up, SiLU, and down
 projections in a single TPU launch.
 
+Registration:
+    import tpu_demo.mlp_w8a16.mlp_w8a16_dq_forward  # registers torch.ops.my_ops
+
 Usage:
-    output = mlp_w8a16_dq_forward(x, gate_w, up_w, down_w,
-                                   gate_s, up_s, down_s, output, blocksize=128)
+    output = torch.ops.my_ops.mlp_w8a16_dq_forward(
+        x, gate_w, up_w, down_w, gate_s, up_s, down_s, output, blocksize=128)
 """
 
 import torch
@@ -101,3 +104,31 @@ def mlp_w8a16_dq_forward(x, gate_weight, up_weight, down_weight,
     kernel(x, gate_w_fp16, up_w_fp16, down_w_fp16, output)
 
     return output
+
+
+# ============================================================
+# torch custom op registration
+# Usage: import this module, then call torch.ops.my_ops.mlp_w8a16_dq_forward(...)
+# ============================================================
+@torch.library.custom_op("my_ops::mlp_w8a16_dq_forward", mutates_args=())
+def mlp_w8a16_dq_forward_op(
+    x: torch.Tensor,
+    gate_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    gate_scale: torch.Tensor,
+    up_scale: torch.Tensor,
+    down_scale: torch.Tensor,
+    blocksize: int = 128,
+) -> torch.Tensor:
+    """W8A16 dequantized MLP forward — fused TPU kernel.
+
+    Computes: output = down_proj(silu(gate_proj(x)) * up_proj(x))
+    """
+    M, hidden = x.shape
+    output = torch.empty(M, hidden, dtype=x.dtype, device=x.device)
+    return mlp_w8a16_dq_forward(
+        x, gate_weight, up_weight, down_weight,
+        gate_scale, up_scale, down_scale,
+        output, blocksize=blocksize,
+    )
