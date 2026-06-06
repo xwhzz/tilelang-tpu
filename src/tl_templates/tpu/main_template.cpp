@@ -11,13 +11,18 @@
 tpuRtStream_t stream;
 tpuRtKernelModule_t tpu_module;
 
+static bool g_tpu_initialized = false;
+
 int init(){{
   tpuRtStatus_t ret;
-  ret = tpuRtInit();
-  if (ret != tpuRtSuccess) {{
-    return -1;
+  if (!g_tpu_initialized) {{
+    ret = tpuRtInit();
+    if (ret != tpuRtSuccess) {{
+      return -1;
+    }}
+    tpuRtSetDevice(0); // Set TPU ID
+    g_tpu_initialized = true;
   }}
-  tpuRtSetDevice(14); // Set TPU ID
   tpuRtStreamCreate(&stream);
   auto kernel_dir = getenv("PPL_KERNEL_PATH");
   if (!kernel_dir) {{
