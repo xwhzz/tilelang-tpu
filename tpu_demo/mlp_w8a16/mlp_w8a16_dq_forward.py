@@ -23,7 +23,7 @@ _kernel_cache = {}
 
 def _get_or_compile_kernel(M, hidden, intermediate,
                             block_M, block_N, block_K, block_D,
-                            target="tpu", mode="cmodel"):
+                            target="tpu", mode="pcie"):
     """Get or compile the fused MLP kernel."""
     cache_key = (M, hidden, intermediate, block_M, block_N, block_K, block_D, target, mode)
     if cache_key not in _kernel_cache:
@@ -43,7 +43,7 @@ def _get_or_compile_kernel(M, hidden, intermediate,
 def mlp_w8a16_dq_forward(x, gate_weight, up_weight, down_weight,
                           gate_scale, up_scale, down_scale,
                           output, blocksize=128,
-                          target="tpu", mode="cmodel"):
+                          target="tpu", mode="pcie"):
     """W8A16 dequantized MLP forward — single fused TPU kernel.
 
     Computes: output = down_proj(silu(gate_proj(x)) * up_proj(x))
@@ -87,10 +87,10 @@ def mlp_w8a16_dq_forward(x, gate_weight, up_weight, down_weight,
     down_w_fp16 = dequant_weight(down_weight, down_scale, blocksize)
 
     # Tile size selection
-    block_M = min(32, M)
+    block_M = min(16, M)
     block_N = min(128, intermediate)
     block_K = min(128, hidden)
-    block_D = min(128, hidden)
+    block_D = block_N  # Must equal block_N per kernel assertion
 
     # Single fused kernel: gate + up + SiLU + down
     kernel = _get_or_compile_kernel(

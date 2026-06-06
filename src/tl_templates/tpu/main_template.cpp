@@ -26,11 +26,13 @@ int init(){{
   tpuRtStreamCreate(&stream);
   auto kernel_dir = getenv("PPL_KERNEL_PATH");
   if (!kernel_dir) {{
+    tpuRtStreamDestroy(stream);
     return -2;
   }}
   tpu_module = tpuRtKernelLoadModuleFile(kernel_dir, stream);
   if (NULL == tpu_module) {{
     printf("tpuRtKernelLoadModuleFile failed\n");
+    tpuRtStreamDestroy(stream);
     return -2;
   }}
   return 0;

@@ -89,6 +89,7 @@ def mlp_w8a16_fused_kernel(
             T.ppl_fill(ones, T.float32(1.0))
 
             # --- SiLU: exp2 work buffers (pattern from tpu_test_swiglu_fp32.py) ---
+            # exp_work0 reused as negate buffer before exp2 call
             exp_work0 = T.alloc_shared((block_M, block_N), accum_dtype)
             exp_work1 = T.alloc_shared((block_M, block_N), accum_dtype)
             # coeff and table shapes from BM1690 hardware spec (npu=64)
@@ -133,20 +134,20 @@ def mlp_w8a16_fused_kernel(
                     # SiLU(gate_accum) * up_accum (on-NPU, local)
                     # Pattern verified in tpu_test_swiglu_fp32.py
                     # =============================================
-                    # Step 1: Backup gate_accum → C_temp
+                    # Step 1: Backup gate_accum → C_temp (for later div)
                     T.ppl_copy(gate_accum, C_temp)
-                    # Step 2: Negate gate_accum in-place
-                    T.ppl_mul_C(gate_accum, gate_accum, T.float32(-1.0))
-                    # Step 3: exp2 on gate_accum → exp(-g)
-                    T.ppl_exp2(gate_accum, exp_work0, exp_work1, exp_coeff, exp_table)
-                    # Step 4: exp_work0 = exp(-g) + 1
-                    T.ppl_add(exp_work0, gate_accum, ones)
-                    # Step 5: gate_accum = g / (exp(-g) + 1) = SiLU(g)
-                    T.ppl_div(gate_accum, C_temp, exp_work0)
-                    # Step 6: gate_accum = SiLU(g) * up_accum
-                    T.ppl_mul(gate_accum, gate_accum, up_accum)
+                    # Step 2: exp_work0 = -gate_accum
+                    T.ppl_mul_C(exp_work0, gate_accum, T.float32(-1.0))
+                    # Step 3: exp_work0 = exp2(-gate), using exp_work1+gate_accum as scratch
+                    T.ppl_exp2(exp_work0, exp_work1, gate_accum, exp_coeff, exp_table)
+                    # Step 4: exp_work1 = exp(-gate) + 1
+                    T.ppl_add(exp_work1, exp_work0, ones)
+                    # Step 5: gate_accum = C_temp / exp_work1 = SiLU(gate)
+                    T.ppl_div(gate_accum, C_temp, exp_work1)
+                    # Step 6: C_temp = SiLU(gate) * up
+                    T.ppl_mul(C_temp, gate_accum, up_accum)
                     # Cast to fp16 for down GEMM
-                    T.ppl_copy(gate_accum, act_fp16)
+                    T.ppl_copy(C_temp, act_fp16)
 
                     # --- Down projection (accumulate across N-tiles) ---
                     T.ppl_copy(W_down[d_tile * block_D, n_tile * block_N], W_shared)

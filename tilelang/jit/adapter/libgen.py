@@ -95,6 +95,15 @@ class LibraryGenerator(object):
                 raise EnvironmentError("PPL_PROJECT_ROOT environment variable is not set.")
             CHIP = "bm1690"
 
+            # Clean stale artifacts so ctypes.CDLL doesn't cache old .so
+            import glob
+            tpu_dir = get_tpu_template_dir()
+            for stale in glob.glob(f"{tpu_dir}/*.o") + glob.glob(f"{tpu_dir}/*.so"):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+
             if mode=="pcie":
                 self.tpu_compile_pcie(timeout=timeout, PPL_TOP=PPL_TOP, CHIP=CHIP)
             elif mode=="cmodel":
@@ -102,7 +111,20 @@ class LibraryGenerator(object):
             else:
                 raise ValueError(f"Unsupported compile mode: {mode}")
             self.srcpath = src.name
-            self.libpath = f"{get_tpu_template_dir()}/main.so"
+            # Use unique paths to avoid ctypes.CDLL dlopen cache across compilations
+            import time
+            uniq = f"{os.getpid()}_{int(time.time()*1e6)}"
+            tpu_dir = get_tpu_template_dir()
+            main_path = f"{tpu_dir}/main.so"
+            kernel_path = f"{tpu_dir}/libkernel.so"
+            main_unique = f"{tpu_dir}/main_{uniq}.so"
+            kernel_unique = f"{tpu_dir}/libkernel_{uniq}.so"
+            if os.path.exists(main_path):
+                os.rename(main_path, main_unique)
+            if os.path.exists(kernel_path):
+                os.rename(kernel_path, kernel_unique)
+            self.libpath = main_unique if os.path.exists(main_unique) else main_path
+            os.environ["PPL_KERNEL_PATH"] = kernel_unique if os.path.exists(kernel_unique) else kernel_path
             return
 
         else:
@@ -303,6 +325,9 @@ class LibraryGenerator(object):
         if ret1.returncode != 0 or ret2.returncode != 0 or ret3.returncode != 0:
             raise RuntimeError(f"Host Compilation Failed! {cmd_shared}")
 
+        # Set PPL_KERNEL_PATH so main.so can find libkernel.so at runtime
+        os.environ["PPL_KERNEL_PATH"] = f"{src_dir}/libkernel.so"
+
 
     def tpu_compile_cmodel(self, PPL_TOP, CHIP, timeout):
         src_dir = get_tpu_template_dir()
@@ -416,3 +441,6 @@ class LibraryGenerator(object):
         -ltpuv7_rt -lcdm_daemon_emulator -lpthread"""
                 
         execute_command(cmd6, "Link main.so lib", timeout)
+
+        # Set PPL_KERNEL_PATH so main.so can find libkernel.so at runtime
+        os.environ["PPL_KERNEL_PATH"] = f"{OUTPUT_PATH}/libkernel.so"
