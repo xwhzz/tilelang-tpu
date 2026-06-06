@@ -14,7 +14,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from torch_ref import dequant_matmul_ref
+from tpu_demo.mlp_w8a16.torch_ref import dequant_matmul_ref
 
 
 def dequant_matmul_kernel_uniform(M, N, K, block_M, block_N, block_K,

@@ -70,6 +70,11 @@ def mlp_w8a16_dq_forward_ref(x, gate_w, up_w, down_w,
     gate = dequant_matmul_ref(x, gate_w, gate_s, blocksize)
     up = dequant_matmul_ref(x, up_w, up_s, blocksize)
     act = F.silu(gate.float()) * up.float()
+    # Clamp to normal fp16 range (matching TPU wrapper behavior)
+    fp16_min_normal = 6.0e-5
+    fp16_max = 65500.0
+    act = act.clamp(-fp16_max, fp16_max)
+    act = torch.where(act.abs() < fp16_min_normal, torch.zeros_like(act), act)
     out = dequant_matmul_ref(act.half(), down_w, down_s, blocksize)
     return out
 
