@@ -456,6 +456,52 @@ def ppl_div(out, inp1, inp2):
     return T.call_extern("handle", "ppl.div", outptr, inpptr1, inpptr2)
 
 
+def ppl_min(out, inp1, inp2):
+    """Compute elementwise minimum `out = min(inp1, inp2)`.
+
+    Args:
+        out: Output tile.
+        inp1: Left-hand input tile.
+        inp2: Right-hand input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted minimum extern call.
+
+    Example:
+        `T.ppl_min(clamped, act, max_val)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+    """
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.min", outptr, inpptr1, inpptr2)
+
+
+def ppl_max(out, inp1, inp2):
+    """Compute elementwise maximum `out = max(inp1, inp2)`.
+
+    Args:
+        out: Output tile.
+        inp1: Left-hand input tile.
+        inp2: Right-hand input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted maximum extern call.
+
+    Example:
+        `T.ppl_max(clamped, act, min_val)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+    """
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.max", outptr, inpptr1, inpptr2)
+
+
 @T.macro
 def ppl_reduce_sum_safe(inp, out, dim):
     """Internal macro backing `ppl_reduce_sum`.

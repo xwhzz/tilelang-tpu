@@ -625,6 +625,7 @@ class TLTPUSourceWrapper(object):
         "int32": "DT_INT32",
         "uint32": "DT_UINT32",
         "bfloat16": "DT_BFP16",
+        "int8": "DT_INT8",
     }
 
     _ELEM_BYTES = {
