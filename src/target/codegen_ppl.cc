@@ -1087,6 +1087,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       handle_elementwise("tpu_bdc_fp_add", true);
     } else if (op_name == "ppl.div") {
       handle_elementwise("tpu_bdc_fp_div", true);
+    } else if (op_name == "ppl.min") {
+      handle_elementwise("tpu_bdc_fp_min", true);
+    } else if (op_name == "ppl.max") {
+      handle_elementwise("tpu_bdc_fp_max", true);
     } else if (op_name == "ppl.mul_C") {
       handle_elementwise_const("tpu_bdc_fp_mul_C");
     } else if (op_name == "ppl.add_C") {

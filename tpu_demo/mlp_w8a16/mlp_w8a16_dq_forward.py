@@ -90,7 +90,7 @@ def mlp_w8a16_dq_forward(x, gate_weight, up_weight, down_weight,
     down_w_fp16 = dequant_weight(down_weight, down_scale, blocksize)
 
     # Tile size selection
-    block_M = min(16, M)
+    block_M = min(32, M)
     block_N = min(128, intermediate)
     block_K = min(128, hidden)
     block_D = block_N  # Must equal block_N per kernel assertion

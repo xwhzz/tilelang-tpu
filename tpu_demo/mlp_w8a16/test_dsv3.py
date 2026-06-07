@@ -30,7 +30,7 @@ def test_dsv3(name, M, hidden, intermediate, mode="cmodel", blocksize=128):
     up_w_fp16 = dequant_weight(up_w, up_s, blocksize)
     down_w_fp16 = dequant_weight(down_w, down_s, blocksize)
 
-    block_M = min(16, M)
+    block_M = min(32, M)  # support block_M=32 after buffer optimizations
     block_N = min(128, intermediate)
     block_K = min(128, hidden)
     block_D = block_N
