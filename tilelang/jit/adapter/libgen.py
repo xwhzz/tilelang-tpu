@@ -147,6 +147,28 @@ class LibraryGenerator(object):
     def set_src_path(self, srcpath):
         self.srcpath = srcpath
 
+    def _prepare_cmodel_kernel_source(self, kernel_path: str):
+        with open(kernel_path, "r") as f:
+            kernel_code = f.read()
+
+        start_count = kernel_code.count("tpu_parallel_start();")
+        end_count = kernel_code.count("tpu_parallel_end();")
+        sanitized = kernel_code.replace("      tpu_parallel_start(); \n", "")
+        sanitized = sanitized.replace("      tpu_parallel_end(); \n", "")
+        sanitized = sanitized.replace("tpu_parallel_start(); \n", "")
+        sanitized = sanitized.replace("tpu_parallel_end(); \n", "")
+
+        if sanitized != kernel_code:
+            logger.info(
+                "Stripping TPU pipeline parallel markers for cmodel execution "
+                "(start=%d, end=%d)", start_count, end_count)
+            if start_count != end_count:
+                logger.warning(
+                    "Mismatched TPU pipeline parallel markers before cmodel stripping "
+                    "(start=%d, end=%d)", start_count, end_count)
+            with open(kernel_path, "w") as f:
+                f.write(sanitized)
+
     def tpu_compile_pcie(self, timeout, PPL_TOP, CHIP):
         TOOLCHAIN_DIR = f"{PPL_TOP}/third_party/toolchains_dir/Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1"
         CROSS_COMPILE = f"{TOOLCHAIN_DIR}/bin/riscv64-unknown-linux-gnu-"
@@ -314,6 +336,8 @@ class LibraryGenerator(object):
         print(f"Output: {OUTPUT_PATH}")
         print("Mode: cmodel")
         print("=" * 60)
+
+        self._prepare_cmodel_kernel_source(KERNEL_C)
         
         # 1. Compile kernel-cpp (kernel_cpp)
         cmd1 = f"""/usr/bin/c++ -D__{CHIP}__ \
@@ -391,10 +415,9 @@ class LibraryGenerator(object):
         {OUTPUT_PATH}/kernel_cpp.o \
         {OUTPUT_PATH}/main_cpp.o \
         -o {OUTPUT_PATH}/main.so \
-        -L{PPL_TOP}/runtime/{CHIP}/lib \
         -L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
-        -Wl,-rpath,{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
+        -L{PPL_TOP}/runtime/{CHIP}/lib \
+        -Wl,--disable-new-dtags,-rpath,{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib:{PPL_TOP}/runtime/{CHIP}/lib \
         -ltpuv7_rt -lcdm_daemon_emulator -lpthread"""
                 
         execute_command(cmd6, "Link main.so lib", timeout)
-

@@ -23,9 +23,13 @@
  * producers and consumers
  */
 #include <tvm/target/target.h>
+#include <tvm/ir/op.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
 
+#include <algorithm>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "support/utils.h"
@@ -129,6 +133,47 @@ private:
     return buffer_region;
   }
 
+  PrimExpr MakeVersionSelector(const Array<Buffer> &material_bufs) const {
+    int buf_size = material_bufs.size();
+    ICHECK_GT(buf_size, 0);
+    if (buf_size == 1) {
+      return material_bufs[0]->data;
+    }
+
+    Array<PrimExpr> conditions;
+    for (int i = 0; i < buf_size - 1; i++) {
+      conditions.push_back(equal(
+          floormod((pipeline_loop_->loop_var - pipeline_loop_->min), buf_size),
+          i));
+    }
+
+    PrimExpr selector =
+        if_then_else(conditions[buf_size - 2], material_bufs[buf_size - 2]->data,
+                     material_bufs[buf_size - 1]->data);
+    for (int i = buf_size - 3; i >= 0; i--) {
+      selector = if_then_else(conditions[i], material_bufs[i]->data, selector);
+    }
+    return selector;
+  }
+
+  bool AddVersionedDescriptorLet(const Buffer &buffer,
+                                 const Buffer &new_buffer) {
+    auto material_bufs = buffer_remap_material_.at(buffer);
+    if (material_bufs.size() <= 1) {
+      return false;
+    }
+    new_bufs_var.push_back(new_buffer->data);
+    if_exprs.push_back(MakeVersionSelector(material_bufs));
+    return true;
+  }
+
+  Buffer MakeDescriptorAliasBuffer(const Buffer &buffer,
+                                   const Buffer &new_buffer) const {
+    ObjectPtr<BufferNode> alias = make_object<BufferNode>(*(buffer.get()));
+    alias->data = new_buffer->data;
+    return Buffer(alias);
+  }
+
   PrimExpr RewriteBufferAccess(const Call &call,
                                const std::vector<int> arg_indices) {
     auto product = [](const Array<PrimExpr> &input) {
@@ -172,11 +217,62 @@ private:
             if_stmt = if_then_else(condition_list[i], bufs[i]->data, if_stmt);
           }
         }
-        new_bufs_var.push_back(buffer->data);
+        new_bufs_var.push_back(new_buffer->data);
         if_exprs.push_back(if_stmt);
+        new_args.Set(i, new_buffer->data);
         new_args.Set(i + 1, old_index);
       }
     }
+    return Call(call->dtype, call->op, new_args, call->span);
+  }
+
+  PrimExpr RewriteRegionAccess(const Call &call) {
+    if (call->args.empty()) {
+      return call;
+    }
+    const auto *load_node = call->args[0].as<BufferLoadNode>();
+    if (!load_node) {
+      Array<PrimExpr> visited_args;
+      for (const PrimExpr &arg : call->args) {
+        visited_args.push_back(StmtExprMutator::VisitExpr(arg));
+      }
+      return Call(call->dtype, call->op, visited_args, call->span);
+    }
+
+    BufferLoad load = GetRef<BufferLoad>(load_node);
+    auto it = buffer_remap_.find(load->buffer);
+    if (it == buffer_remap_.end()) {
+      Array<PrimExpr> visited_args;
+      for (const PrimExpr &arg : call->args) {
+        visited_args.push_back(StmtExprMutator::VisitExpr(arg));
+      }
+      return Call(call->dtype, call->op, visited_args, call->span);
+    }
+
+    const Buffer &new_buffer = (*it).second;
+    if (!AddVersionedDescriptorLet(load->buffer, new_buffer)) {
+      Array<PrimExpr> visited_args;
+      for (const PrimExpr &arg : call->args) {
+        visited_args.push_back(StmtExprMutator::VisitExpr(arg));
+      }
+      return Call(call->dtype, call->op, visited_args, call->span);
+    }
+
+    Array<PrimExpr> new_indices;
+    for (const PrimExpr &index : load->indices) {
+      new_indices.push_back(StmtExprMutator::VisitExpr(index));
+    }
+
+    Buffer descriptor_alias = MakeDescriptorAliasBuffer(load->buffer, new_buffer);
+    Array<PrimExpr> new_args;
+    new_args.push_back(BufferLoad(descriptor_alias, new_indices));
+    for (size_t i = 1; i < call->args.size(); ++i) {
+      new_args.push_back(StmtExprMutator::VisitExpr(call->args[i]));
+    }
+
+    cur_buffer_ = NullOpt;
+    condition_list.clear();
+    bufs.clear();
     return Call(call->dtype, call->op, new_args, call->span);
   }
 
@@ -222,7 +318,11 @@ private:
         if_stmt = if_then_else(condition_list[i], bufs[i]->data, if_stmt);
       }
     }
-    LetStmt let_stmt = LetStmt(cur_buffer_.get()->data, if_stmt, Evaluate(op));
+    Buffer buffer = GetRef<Buffer>(cur_buffer_.get());
+    auto it = buffer_remap_.find(buffer);
+    Var let_var = it != buffer_remap_.end() ? (*it).second->data
+                                            : buffer->data;
+    LetStmt let_stmt = LetStmt(let_var, if_stmt, Evaluate(op));
     return let_stmt;
   }
 
@@ -318,6 +418,9 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(Op::Get("tl.region"))) {
+      return RewriteRegionAccess(GetRef<Call>(op));
+    }
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
@@ -346,11 +449,13 @@ class PipelineRewriter : public StmtExprMutator {
 public:
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
-                   const For &pipeline_loop, const PipelineInfo &pipeline_info)
+                   const For &pipeline_loop, const PipelineInfo &pipeline_info,
+                   std::unordered_map<std::string, int> buffer_version_hints)
 
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), pipeline_loop_(pipeline_loop),
-        pipeline_info_(pipeline_info) {}
+        pipeline_info_(pipeline_info),
+        buffer_version_hints_(std::move(buffer_version_hints)) {}
 
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
@@ -359,6 +464,8 @@ public:
         infos = GetBufferAccessInfo();
     for (const Buffer &buffer : pipeline_allocs_) {
       int num_versions = ComputeBufferVersions(buffer, infos.at(buffer));
+      num_versions =
+          std::max(num_versions, GetBufferVersionHint(buffer));
       if (num_versions > 1) {
         buffer_remap_.Set(buffer, RewriteAllocBuffer(buffer, num_versions));
         buffer_remap_material_.Set(
@@ -383,6 +490,9 @@ public:
             state.dst_buffers.insert(buffer_remap_[buffer].get());
         }
       }
+    }
+    if (max_stage_ <= 0 && async_states.empty() && buffer_remap_.empty()) {
+      return pipeline_loop_;
     }
     std::unordered_set<int> consumed;
     for (const Block &block : ordered_stmts_) {
@@ -576,6 +686,14 @@ private:
     return num_versions;
   }
 
+  int GetBufferVersionHint(const Buffer &buffer) const {
+    auto it = buffer_version_hints_.find(std::string(buffer->name));
+    if (it == buffer_version_hints_.end()) {
+      return 1;
+    }
+    return std::max(1, it->second);
+  }
+
   /*!
    * \brief Rewrite buffer allocation to keep multiple versions of original
    * buffer for pipelined accesses. \param buffer The buffer to be resized.
@@ -584,6 +702,7 @@ private:
    */
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
+    new_buffer->data = new_buffer->data.copy_with_suffix("_pipe");
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
     if (new_buffer->strides.size()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
@@ -846,7 +965,6 @@ private:
       auto parallel_start = AttrStmt(make_zero(DataType::Int(32)),
                                      "tpu_parallel_start", 0, no_op);
       stmts.insert(stmts.begin(), parallel_start);
-      std::cout << "850 OK" << std::endl;
       auto parallel_end =
           AttrStmt(make_zero(DataType::Int(32)), "tpu_parallel_end", 0, no_op);
       stmts.push_back(parallel_end);
@@ -867,7 +985,8 @@ private:
         const String &key = kv.first;
         if (kv.first != tir::attr::software_pipeline_stage &&
             kv.first != tir::attr::software_pipeline_order &&
-            kv.first != tir::attr::software_pipeline_async_stages) {
+            kv.first != tir::attr::software_pipeline_async_stages &&
+            kv.first != "tl_pipeline_buffer_versions") {
           preserved_annotations.Set(key, kv.second);
         }
       }
@@ -890,6 +1009,7 @@ private:
   Array<Buffer> pipeline_allocs_;
   For pipeline_loop_;
   PipelineInfo pipeline_info_;
+  std::unordered_map<std::string, int> buffer_version_hints_;
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
   Map<Buffer, Array<Buffer>> buffer_remap_material_;
@@ -947,6 +1067,134 @@ public:
 private:
   explicit PipelineInjector(Optional<String> global_symbol)
       : global_symbol_(global_symbol) {}
+
+  struct AttentionWindowBAnnotation {
+    int load_statement = -1;
+    int overlap_start = -1;
+    int overlap_end = -1;
+    int consumer_statement = -1;
+  };
+
+  bool TryGetAttentionWindowBAnnotation(
+      const ForNode *op, AttentionWindowBAnnotation *window) const {
+    auto annot = op->annotations.Get("tl_tpu_attention_window_b");
+    if (!annot.defined()) {
+      return false;
+    }
+    Map<String, Integer> values =
+        Downcast<Map<String, Integer>>(annot.value());
+    auto get = [&](const char *key) -> int {
+      auto value = values.Get(key);
+      CHECK(value.defined()) << "tl_tpu_attention_window_b missing key "
+                             << key;
+      return static_cast<int>(value.value()->value);
+    };
+    window->load_statement = get("load_statement");
+    window->overlap_start = get("overlap_start");
+    window->overlap_end = get("overlap_end");
+    window->consumer_statement = get("consumer_statement");
+    return true;
+  }
+
+  Map<String, ObjectRef> FilterPipelineAnnotations(const For &for_node) const {
+    Map<String, ObjectRef> preserved_annotations;
+    for (const auto &kv : for_node->annotations) {
+      const String &key = kv.first;
+      if (key != tir::attr::software_pipeline_stage &&
+          key != tir::attr::software_pipeline_order &&
+          key != tir::attr::software_pipeline_async_stages &&
+          key != "tl_pipeline_buffer_versions" &&
+          key != "tl_tpu_attention_window_b" &&
+          key != "tl_tpu_parallel_guard_region" &&
+          key != "tl_tpu_attention_guard_region") {
+        preserved_annotations.Set(key, kv.second);
+      }
+    }
+    return preserved_annotations;
+  }
+
+  bool PipelineStagesAreAllZero(const Array<Integer> &pipeline_stages) const {
+    for (const Integer &stage : pipeline_stages) {
+      if (stage->value != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Stmt MaterializeAttentionWindowB(const For &for_node,
+                                   const SeqStmtNode *pipeline_body_seq,
+                                   const AttentionWindowBAnnotation &window) {
+    int stmt_count = static_cast<int>(pipeline_body_seq->seq.size());
+    CHECK_GE(window.overlap_start, 0);
+    CHECK_GE(window.overlap_end, window.overlap_start);
+    CHECK_GE(window.load_statement, 0);
+    CHECK_LT(window.overlap_end, stmt_count);
+    CHECK_LT(window.load_statement, stmt_count);
+    CHECK_GT(window.load_statement, window.overlap_end)
+        << "Window B materializer only supports moving a later V load before "
+           "the certified overlap segment.";
+
+    Array<Stmt> stmts;
+    Stmt no_op = Evaluate(0);
+    for (int i = 0; i < stmt_count; ++i) {
+      if (i == window.load_statement) {
+        continue;
+      }
+      if (i == window.overlap_start) {
+        stmts.push_back(AttrStmt(make_zero(DataType::Int(32)),
+                                 "tpu_parallel_start", 0, no_op));
+        stmts.push_back(pipeline_body_seq->seq[window.load_statement]);
+        for (int j = window.overlap_start; j <= window.overlap_end; ++j) {
+          stmts.push_back(pipeline_body_seq->seq[j]);
+        }
+        stmts.push_back(AttrStmt(make_zero(DataType::Int(32)),
+                                 "tpu_parallel_end", 0, no_op));
+        i = window.overlap_end;
+        continue;
+      }
+      stmts.push_back(pipeline_body_seq->seq[i]);
+    }
+
+    Stmt new_body = stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+    if (const auto *realize = for_node->body.as<BlockRealizeNode>()) {
+      Block block = realize->block;
+      BlockNode *n = block.CopyOnWrite();
+      n->body = new_body;
+      new_body =
+          BlockRealize(realize->iter_values, realize->predicate, block);
+    }
+
+    return For(for_node->loop_var, for_node->min, for_node->extent,
+               for_node->kind, new_body, for_node->thread_binding,
+               FilterPipelineAnnotations(for_node));
+  }
+
+  Stmt MaterializeTpuParallelGuardRegion(
+      const For &for_node, const SeqStmtNode *pipeline_body_seq) {
+    Array<Stmt> stmts;
+    Stmt no_op = Evaluate(0);
+    stmts.push_back(AttrStmt(make_zero(DataType::Int(32)),
+                             "tpu_parallel_start", 0, no_op));
+    for (const Stmt &stmt : pipeline_body_seq->seq) {
+      stmts.push_back(stmt);
+    }
+    stmts.push_back(AttrStmt(make_zero(DataType::Int(32)), "tpu_parallel_end",
+                             0, no_op));
+
+    Stmt new_body = SeqStmt(stmts);
+    if (const auto *realize = for_node->body.as<BlockRealizeNode>()) {
+      Block block = realize->block;
+      BlockNode *n = block.CopyOnWrite();
+      n->body = new_body;
+      new_body =
+          BlockRealize(realize->iter_values, realize->predicate, block);
+    }
+
+    return For(for_node->loop_var, for_node->min, for_node->extent,
+               for_node->kind, new_body, for_node->thread_binding,
+               FilterPipelineAnnotations(for_node));
+  }
 
   /*!
    * \brief Check the pipeline satisfies the following conditions:
@@ -1051,7 +1299,6 @@ private:
         f_add_child(pipeline_body_seq->seq[i]);
       }
     }
-    std::cout << __LINE__ << "OK" << std::endl;
     auto pipeline_stages = Downcast<Array<Integer>>(
         op->annotations.at(tir::attr::software_pipeline_stage));
     auto pipeline_orders = Downcast<Array<Integer>>(
@@ -1077,6 +1324,49 @@ private:
       }
     }
 
+    std::unordered_map<std::string, int> buffer_version_hints;
+    if (auto annot = op->annotations.Get("tl_pipeline_buffer_versions")) {
+      Map<String, Integer> hints =
+          Downcast<Map<String, Integer>>(annot.value());
+      for (const auto &[buffer_name, versions] : hints) {
+        buffer_version_hints[std::string(buffer_name)] =
+            static_cast<int>(versions->value);
+      }
+    }
+    if (!buffer_version_hints.empty()) {
+      std::unordered_set<const BufferNode *> seen_allocs;
+      for (const Buffer &buffer : pipeline_allocs) {
+        seen_allocs.insert(buffer.get());
+      }
+      auto pipeline_touches_buffer = [&](const Buffer &buffer) {
+        for (const Block &block : original_order) {
+          for (const BufferRegion &region : block->reads) {
+            if (region->buffer.same_as(buffer)) {
+              return true;
+            }
+          }
+          for (const BufferRegion &region : block->writes) {
+            if (region->buffer.same_as(buffer)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      for (const auto &[_, buffer] : buffer_data_to_buffer_) {
+        auto hint_it = buffer_version_hints.find(std::string(buffer->name));
+        if (hint_it == buffer_version_hints.end() || hint_it->second <= 1) {
+          continue;
+        }
+        if (seen_allocs.count(buffer.get()) ||
+            !pipeline_touches_buffer(buffer)) {
+          continue;
+        }
+        pipeline_allocs.push_back(buffer);
+        seen_allocs.insert(buffer.get());
+      }
+    }
+
     for (size_t i = 0; i < pipeline_stages.size(); i++) {
       int stage = static_cast<int>(pipeline_stages[i]->value);
       bool is_async =
@@ -1086,12 +1376,51 @@ private:
           /*order=*/static_cast<int>(pipeline_orders[i]->value), is_async};
       pipeline_info.emplace(original_order[i], stage_order);
     }
-    std::cout << __LINE__ << "OK" << std::endl;
     ValidatePipelineBody(pipeline_info, original_order);
+
+    AttentionWindowBAnnotation attention_window_b;
+    if (TryGetAttentionWindowBAnnotation(op, &attention_window_b)) {
+      CHECK(PipelineStagesAreAllZero(pipeline_stages))
+          << "tl_tpu_attention_window_b requires all software pipeline "
+             "stages to be 0.";
+      CHECK(pipeline_async_stages.empty())
+          << "tl_tpu_attention_window_b cannot be combined with async stages.";
+      CHECK(buffer_version_hints.empty())
+          << "tl_tpu_attention_window_b cannot be combined with pipeline "
+             "buffer version hints.";
+      CHECK_EQ(original_order.size(), pipeline_body_seq->seq.size())
+          << "tl_tpu_attention_window_b requires statement annotation indices "
+             "to match the top-level pipeline body.";
+      return MaterializeAttentionWindowB(for_node, pipeline_body_seq,
+                                         attention_window_b);
+    }
+    bool has_tpu_parallel_guard_region =
+        op->annotations.Get("tl_tpu_parallel_guard_region").defined();
+    bool has_legacy_attention_guard_region =
+        op->annotations.Get("tl_tpu_attention_guard_region").defined();
+    if (has_tpu_parallel_guard_region || has_legacy_attention_guard_region) {
+      std::string annotation_name =
+          has_tpu_parallel_guard_region ? "tl_tpu_parallel_guard_region"
+                                        : "tl_tpu_attention_guard_region";
+      CHECK(PipelineStagesAreAllZero(pipeline_stages))
+          << annotation_name
+          << " requires all software pipeline "
+             "stages to be 0.";
+      CHECK(pipeline_async_stages.empty())
+          << annotation_name
+          << " cannot be combined with async "
+             "stages.";
+      CHECK(buffer_version_hints.empty())
+          << annotation_name
+          << " cannot be combined with pipeline "
+             "buffer version hints.";
+      return MaterializeTpuParallelGuardRegion(for_node, pipeline_body_seq);
+    }
 
     // Step 4: Rewrite the pipeline body.
     Stmt pipeline = PipelineRewriter(buffer_data_to_buffer_, pipeline_allocs,
-                                     GetRef<For>(op), pipeline_info)
+                                     GetRef<For>(op), pipeline_info,
+                                     std::move(buffer_version_hints))
                         .BuildPipeline();
 
     if (const auto *realize = op->body.as<BlockRealizeNode>()) {
