@@ -1,5 +1,7 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
+import os
+
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
@@ -19,7 +21,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.FrontendLegalize()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
-    print(mod)
+    if os.environ.get("TL_TPU_PRINT_LOWERED_IR"):
+        print(mod)
     # Infer memory layouts for fragments and shared memory
     # mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations

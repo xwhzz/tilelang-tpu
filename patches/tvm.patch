@@ -1,3 +1,23 @@
+diff --git a/src/target/target_kind.cc b/src/target/target_kind.cc
+index fae8298f4..d8ac9691 100644
+--- a/src/target/target_kind.cc
++++ b/src/target/target_kind.cc
+@@ -329,6 +329,14 @@ TVM_REGISTER_TARGET_KIND("c", kDLCPU)
+     .set_default_keys({"cpu"})
+     .set_target_parser(tvm::target::parsers::cpu::ParseTarget);
+-
++
++TVM_REGISTER_TARGET_KIND("tpu", kDLCPU)
++    .add_attr_option<String>("mcpu")
++    .add_attr_option<String>("march")
++    .add_attr_option<Integer>("workspace-byte-alignment")
++    .add_attr_option<Integer>("constants-byte-alignment")
++    .set_default_keys({"cpu"})
++    .set_target_parser(tvm::target::parsers::cpu::ParseTarget);
++
+ TVM_REGISTER_TARGET_KIND("cuda", kDLCUDA)
+     .add_attr_option<String>("mcpu")
+     .add_attr_option<String>("arch")
 diff --git a/src/tir/analysis/block_access_region_detector.cc b/src/tir/analysis/block_access_region_detector.cc
 index 57cf0ae1bf..113244b5a5 100644
 --- a/src/tir/analysis/block_access_region_detector.cc

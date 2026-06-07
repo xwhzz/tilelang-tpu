@@ -1501,27 +1501,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "  }\n";
 
       this->PrintIndent();
-      this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info tmp_view = {.shape = out_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_max_pool2d(tmp_view.addr, input_view.addr, "
-                      "&input_view.shape, "
-                   << "&kernel, &pad, &stride, &dilation, " << dtype
-                   << ", pad_val);\n";
-      this->PrintIndent();
       this->stream << "  dim2 kernel2 = {1, eu_num};\n";
       this->PrintIndent();
       this->stream << "  __ppl_tensor_info output_view = {.shape = out_reduce_w, "
@@ -1530,20 +1509,59 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ", "
                    << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                    << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, "
-                      "&tmp_view2.shape, "
-                   << "&kernel2, &pad, &stride, &dilation, " << dtype
-                   << ", pad_val);\n";
+      if (align_w / eu_num == 1) {
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_w, "
+                        ".stride = {0}, "
+                     << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
+        this->PrintIndent();
+        this->stream
+            << "  tpu_bdc_fp_max_pool2d(output_view.addr, input_view.addr, "
+               "&input_view.shape, "
+            << "&kernel2, &pad, &stride, &dilation, " << dtype
+            << ", pad_val);\n";
+      } else {
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_h, "
+                        ".stride = {0}, "
+                     << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info tmp_view = {.shape = out_reduce_h, "
+                        ".stride = {0}, "
+                     << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream
+            << "  tpu_bdc_fp_max_pool2d(tmp_view.addr, input_view.addr, "
+               "&input_view.shape, "
+            << "&kernel, &pad, &stride, &dilation, " << dtype
+            << ", pad_val);\n";
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, "
+                        ".stride = {0}, "
+                     << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "  pad_val.u32 = FP_NEG_MAX(" << dtype << ");\n";
+        this->PrintIndent();
+        this->stream
+            << "  tpu_bdc_fp_max_pool2d(output_view.addr, tmp_view2.addr, "
+               "&tmp_view2.shape, "
+            << "&kernel2, &pad, &stride, &dilation, " << dtype
+            << ", pad_val);\n";
+      }
       this->PrintIndent();
       this->stream << "}\n";
 
@@ -1744,25 +1762,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "  }\n";
 
       this->PrintIndent();
-      this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info tmp_view = {.shape = out_reduce_h, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
-                      "&input_view.shape, "
-                   << "&kernel, &pad, &stride, &dilation, " << dtype
-                   << ", scale);\n";
-      this->PrintIndent();
       this->stream << "  dim2 kernel2 = {1, eu_num};\n";
       this->PrintIndent();
       this->stream << "  __ppl_tensor_info output_view = {.shape = out_reduce_w, "
@@ -1771,18 +1770,55 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ", "
                    << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
                    << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  __ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, "
-                      ".stride = {0}, "
-                   << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
-                   << ", "
-                   << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
-                   << ".unsigned_flag = 0, .default_stride = true};\n";
-      this->PrintIndent();
-      this->stream << "  tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
-                      "&tmp_view2.shape, "
-                   << "&kernel2, &pad, &stride, &dilation, " << dtype
-                   << ", scale);\n";
+      if (align_w / eu_num == 1) {
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_w, "
+                        ".stride = {0}, "
+                     << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream
+            << "  tpu_bdc_fp_avg_pool2d(output_view.addr, input_view.addr, "
+               "&input_view.shape, "
+            << "&kernel2, &pad, &stride, &dilation, " << dtype
+            << ", scale);\n";
+      } else {
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info input_view = {.shape = in_reduce_h, "
+                        ".stride = {0}, "
+                     << ".addr = " << input_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info tmp_view = {.shape = out_reduce_h, "
+                        ".stride = {0}, "
+                     << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream
+            << "  tpu_bdc_fp_avg_pool2d(tmp_view.addr, input_view.addr, "
+               "&input_view.shape, "
+            << "&kernel, &pad, &stride, &dilation, " << dtype
+            << ", scale);\n";
+        this->PrintIndent();
+        this->stream << "  __ppl_tensor_info tmp_view2 = {.shape = in_reduce_w, "
+                        ".stride = {0}, "
+                     << ".addr = " << tmp_tensor << ".addr, .dtype = " << dtype
+                     << ", "
+                     << ".mode = 0, .align_mode = 1, .size = 1, .offset = 0, "
+                     << ".unsigned_flag = 0, .default_stride = true};\n";
+        this->PrintIndent();
+        this->stream
+            << "  tpu_bdc_fp_avg_pool2d(output_view.addr, tmp_view2.addr, "
+               "&tmp_view2.shape, "
+            << "&kernel2, &pad, &stride, &dilation, " << dtype
+            << ", scale);\n";
+      }
       this->PrintIndent();
       this->stream << "}\n";
 

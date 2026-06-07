@@ -24,8 +24,10 @@
  */
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/type.h>
+#include <tvm/node/repr_printer.h>
 #include <tvm/relay/expr.h>
 #include <tvm/runtime/registry.h>
+#include <tvm/target/target.h>
 #include <tvm/target/target_info.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -36,10 +38,15 @@
 
 // #include <map>
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstdint>
+#include <fstream>
+#include <iostream>
 #include <limits>
 #include <list>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,6 +56,7 @@
 #include "../op/bulk_copy.h"
 #include "../op/gemm.h"
 #include "../target/bm1690_lmem.h"
+#include "tpu_op_access_model.h"
 
 namespace tvm {
 namespace tl {
@@ -58,6 +66,206 @@ namespace {
 
 int64_t AlignUp(int64_t value, int64_t align) {
   return bm1690::AlignUp(value, align);
+}
+
+std::string GetAddressAssignDumpSink() {
+  const char *env = std::getenv("TL_TPU_ADDRESS_ASSIGN_DUMP");
+  if (env == nullptr) {
+    return "";
+  }
+  std::string sink(env);
+  if (sink.empty() || sink == "0" || sink == "false" || sink == "False") {
+    return "";
+  }
+  return sink;
+}
+
+void EmitAddressAssignDump(const std::string &text) {
+  std::string sink = GetAddressAssignDumpSink();
+  if (sink.empty()) {
+    return;
+  }
+  if (sink == "1" || sink == "true" || sink == "True" || sink == "stderr") {
+    std::cerr << text;
+    return;
+  }
+  if (sink == "stdout") {
+    std::cout << text;
+    return;
+  }
+  std::ofstream file(sink, std::ios::app);
+  file << text;
+}
+
+std::string ShapeToString(const Array<PrimExpr> &shape) {
+  std::ostringstream os;
+  os << "[";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i != 0) {
+      os << ", ";
+    }
+    os << AsLegacyRepr(shape[i]);
+  }
+  os << "]";
+  return os.str();
+}
+
+bool StageAwareLmemEnabled() {
+  const char *env = std::getenv("TL_TPU_STAGE_AWARE_LMEM");
+  if (env == nullptr) {
+    return true;
+  }
+  std::string value(env);
+  return !(value.empty() || value == "0" || value == "false" ||
+           value == "False");
+}
+
+bool IsTpuPrimFunc(const PrimFunc &f) {
+  auto target = f->GetAttr<Target>(tvm::attr::kTarget);
+  return target.defined() && target.value()->kind.defined() &&
+         target.value()->kind->name == "tpu";
+}
+
+bool IsSimpleGemmCompanionOp(const std::string &op_name) {
+  return op_name == "ppl.copy" || op_name == "ppl.fill" ||
+         op_name == "ppl.gemm";
+}
+
+struct StageAwareLmemPolicy {
+  std::string kind = "non_tpu";
+  std::string reason = "not_tpu_target";
+  bool enabled = false;
+};
+
+class TpuFunctionOpPolicyCollector : public StmtExprVisitor {
+public:
+  void Analyze(const Stmt &stmt) { VisitStmt(stmt); }
+
+  void VisitExpr_(const CallNode *op) final {
+    TpuCallExternAccessInfo info = GetTpuCallExternAccessInfo(op);
+    if (info.valid && info.op_name.rfind("ppl.", 0) == 0) {
+      if (info.op_name == "ppl.gemm") {
+        has_gemm = true;
+      }
+      if (!IsSimpleGemmCompanionOp(info.op_name)) {
+        has_mixed_compute = true;
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "tpu_parallel_start") {
+      has_tpu_parallel_region = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_gemm = false;
+  bool has_mixed_compute = false;
+  bool has_tpu_parallel_region = false;
+};
+
+StageAwareLmemPolicy DecideStageAwareLmemPolicy(const PrimFunc &f) {
+  StageAwareLmemPolicy policy;
+  if (!IsTpuPrimFunc(f)) {
+    return policy;
+  }
+  if (!StageAwareLmemEnabled()) {
+    policy.kind = "disabled_by_env";
+    policy.reason = "TL_TPU_STAGE_AWARE_LMEM=0";
+    policy.enabled = false;
+    return policy;
+  }
+
+  TpuFunctionOpPolicyCollector collector;
+  collector.Analyze(f->body);
+  if (!collector.has_tpu_parallel_region) {
+    policy.kind = "not_pipeline_materialized";
+    policy.reason = "no_tpu_parallel_region";
+    policy.enabled = false;
+    return policy;
+  }
+  if (collector.has_gemm && !collector.has_mixed_compute) {
+    policy.kind = "gemm_heavy";
+    policy.reason = "pure_gemm_pipeline_function";
+    policy.enabled = true;
+    return policy;
+  }
+  if (collector.has_gemm && collector.has_mixed_compute) {
+    policy.kind = "mixed_gemm";
+    policy.reason = "gemm_function_with_elementwise_or_reduction_ops";
+    policy.enabled = false;
+    return policy;
+  }
+  policy.kind = "elementwise_or_generic";
+  policy.reason = "no_pure_gemm_pipeline_function";
+  policy.enabled = false;
+  return policy;
+}
+
+struct PipelineVersionName {
+  bool valid = false;
+  std::string base;
+  int version = -1;
+};
+
+PipelineVersionName ParsePipelineVersionName(const std::string &name) {
+  size_t underscore = name.rfind('_');
+  if (underscore == std::string::npos || underscore + 1 >= name.size()) {
+    return {};
+  }
+  for (size_t i = underscore + 1; i < name.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(name[i]))) {
+      return {};
+    }
+  }
+  PipelineVersionName result;
+  result.valid = true;
+  result.base = name.substr(0, underscore);
+  result.version = std::stoi(name.substr(underscore + 1));
+  return result;
+}
+
+std::string PipelineVersionGroupKey(const BufferNode *buffer,
+                                    const PipelineVersionName &version) {
+  std::ostringstream os;
+  os << version.base << "|" << buffer->dtype << "|"
+     << ShapeToString(buffer->shape);
+  return os.str();
+}
+
+std::unordered_map<const BufferNode *, int> AddPipelineVersionSiblingConflicts(
+    const std::vector<const BufferNode *> &alloc_ops,
+    std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
+        *conflict_map) {
+  std::unordered_map<std::string, std::vector<const BufferNode *>> groups;
+  std::unordered_map<const BufferNode *, int> sibling_degree;
+  for (const BufferNode *op : alloc_ops) {
+    PipelineVersionName version =
+        ParsePipelineVersionName(std::string(op->name));
+    if (!version.valid) {
+      sibling_degree[op] = 0;
+      continue;
+    }
+    groups[PipelineVersionGroupKey(op, version)].push_back(op);
+  }
+
+  for (const auto &kv : groups) {
+    const std::vector<const BufferNode *> &siblings = kv.second;
+    if (siblings.size() < 2) {
+      continue;
+    }
+    for (const BufferNode *lhs : siblings) {
+      sibling_degree[lhs] = static_cast<int>(siblings.size()) - 1;
+      for (const BufferNode *rhs : siblings) {
+        if (lhs != rhs) {
+          (*conflict_map)[lhs].insert(rhs);
+        }
+      }
+    }
+  }
+  return sibling_degree;
 }
 
 } // namespace
@@ -278,12 +486,7 @@ protected:
   int64_t mem_size_;
 };
 
-enum class BufferAccessKind {
-  kRead,
-  kWrite,
-  kReadWrite,
-  kConservative,
-};
+using BufferAccessKind = TpuBufferAccessKind;
 
 class BufferUseCollector : public StmtExprVisitor {
 public:
@@ -368,6 +571,9 @@ private:
     if (it == live_ranges_->end()) {
       return;
     }
+    if (inside_tpu_parallel_region_) {
+      parallel_region_buffers_.insert(buffer);
+    }
     if (!inside_op_) {
       current_loc_ = NextLoc();
     } else {
@@ -396,6 +602,35 @@ private:
       range.start = std::min<uint32_t>(range.start, current_loc_);
       range.end = std::max<uint32_t>(range.end, current_loc_ + 1);
     }
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "tpu_parallel_start") {
+      ICHECK(!inside_tpu_parallel_region_)
+          << "Nested tpu_parallel_start is not supported by AddressAssign";
+      inside_tpu_parallel_region_ = true;
+      parallel_region_start_loc_ = NextLoc();
+      parallel_region_buffers_.clear();
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
+    if (op->attr_key == "tpu_parallel_end") {
+      uint32_t end_loc = NextLoc() + 1;
+      for (const BufferNode *buffer : parallel_region_buffers_) {
+        auto it = live_ranges_->find(buffer);
+        if (it == live_ranges_->end()) {
+          continue;
+        }
+        it->second.start =
+            std::min<uint32_t>(it->second.start, parallel_region_start_loc_);
+        it->second.end = std::max<uint32_t>(it->second.end, end_loc);
+      }
+      inside_tpu_parallel_region_ = false;
+      parallel_region_buffers_.clear();
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
+    StmtExprVisitor::VisitStmt_(op);
   }
 
   void MarkExprAs(const PrimExpr &expr, BufferAccessKind access_kind) {
@@ -463,14 +698,10 @@ private:
   }
 
   bool VisitKnownPPLExtern(const CallNode *op) {
-    if (!op->op.same_as(builtin::call_extern()) || op->args.empty()) {
+    TpuCallExternAccessInfo info = GetTpuCallExternAccessInfo(op);
+    if (!info.valid) {
       return false;
     }
-    auto *op_name_node = op->args[0].as<StringImmNode>();
-    if (!op_name_node) {
-      return false;
-    }
-    std::string op_name = op_name_node->value;
     auto mark_arg = [&](size_t index, BufferAccessKind access_kind) {
       if (index < op->args.size()) {
         MarkExprAs(op->args[index], access_kind);
@@ -478,55 +709,8 @@ private:
     };
 
     OpScope scope(this);
-    if (op_name == "ppl.copy") {
-      mark_arg(1, BufferAccessKind::kRead);
-      mark_arg(2, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.fill") {
-      mark_arg(1, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.gemm") {
-      mark_arg(1, BufferAccessKind::kRead);
-      mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kWrite);
-    } else if (op_name == "ppl.sub" || op_name == "ppl.mul" ||
-               op_name == "ppl.add" || op_name == "ppl.div") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.mul_C" || op_name == "ppl.add_C" ||
-               op_name == "ppl.rsqrt") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.reduce_sum" ||
-               op_name == "ppl.reduce_max") {
-      mark_arg(1, BufferAccessKind::kRead);
-      mark_arg(2, BufferAccessKind::kWrite);
-      mark_arg(3, BufferAccessKind::kReadWrite);
-    } else if (op_name == "ppl.exp") {
-      for (size_t i = 1; i <= 5; ++i) {
-        mark_arg(i, BufferAccessKind::kConservative);
-      }
-    } else if (op_name == "ppl.sigmoid") {
-      for (size_t i = 1; i <= 6; ++i) {
-        mark_arg(i, BufferAccessKind::kConservative);
-      }
-    } else if (op_name == "ppl.gather") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.topk") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kWrite);
-      mark_arg(3, BufferAccessKind::kRead);
-    } else if (op_name == "ppl.rope_add") {
-      mark_arg(1, BufferAccessKind::kWrite);
-      mark_arg(2, BufferAccessKind::kRead);
-      mark_arg(3, BufferAccessKind::kRead);
-      mark_arg(4, BufferAccessKind::kRead);
-      mark_arg(5, BufferAccessKind::kRead);
-    } else {
-      for (size_t i = 1; i < op->args.size(); ++i) {
-        mark_arg(i, BufferAccessKind::kConservative);
-      }
+    for (const auto &operand_access : info.operand_accesses) {
+      mark_arg(operand_access.arg_index, operand_access.access_kind);
     }
     return true;
   }
@@ -584,6 +768,9 @@ private:
   bool inside_op_ = false;
   bool collecting_operand_ = false;
   BufferAccessKind operand_access_kind_ = BufferAccessKind::kConservative;
+  bool inside_tpu_parallel_region_ = false;
+  uint32_t parallel_region_start_loc_ = 0;
+  std::unordered_set<const BufferNode *> parallel_region_buffers_;
 };
 
 PrimFunc InferAddress(PrimFunc f) {
@@ -603,6 +790,14 @@ PrimFunc InferAddress(PrimFunc f) {
   }
   BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)
       .Analyze(f->body);
+  StageAwareLmemPolicy stage_aware_lmem_policy =
+      DecideStageAwareLmemPolicy(f);
+  bool stage_aware_lmem = stage_aware_lmem_policy.enabled;
+  std::unordered_map<const BufferNode *, int> stage_sibling_degree;
+  if (stage_aware_lmem) {
+    stage_sibling_degree =
+        AddPipelineVersionSiblingConflicts(alloc_ops, &bank_conflict_map);
+  }
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
   int64_t memUsedWithBC = 0;
@@ -622,10 +817,46 @@ PrimFunc InferAddress(PrimFunc f) {
       fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
     }
   }
-  std::cerr << "[AddressAssign] success=" << std::boolalpha << success
-            << " buffers=" << alloc_ops.size() << " total=" << memUsedWithBC
-            << " bytes\n";
-
+  if (!GetAddressAssignDumpSink().empty()) {
+    std::ostringstream os;
+    os << "ADDRESS_ASSIGN_DUMP_BEGIN\n";
+    os << "bank_num: " << bank_num << "\n";
+    os << "bank_size: " << bank_size << "\n";
+    os << "total: " << memUsedWithBC << "\n";
+    os << "stage_aware_lmem: "
+       << (stage_aware_lmem ? "enabled" : "disabled") << "\n";
+    os << "stage_aware_lmem_policy: " << stage_aware_lmem_policy.kind
+       << "\n";
+    os << "stage_aware_lmem_reason: " << stage_aware_lmem_policy.reason
+       << "\n";
+    os << "buffers:\n";
+    for (auto op : alloc_ops) {
+      const TensorLive &live = live_ranges[op];
+      int64_t address = addrMapWithBC[op];
+      int64_t size = live.tensor_size;
+      int64_t bank_start = address / bank_size;
+      int64_t bank_end = size > 0 ? (address + size - 1) / bank_size
+                                  : bank_start;
+      os << "  - name: " << op->name << "\n";
+      os << "    dtype: " << op->dtype << "\n";
+      os << "    shape: " << ShapeToString(op->shape) << "\n";
+      os << "    size: " << size << "\n";
+      os << "    live_range: [" << live.start << ", " << live.end << ")\n";
+      os << "    addr: " << address << "\n";
+      os << "    bank_range: [" << bank_start << ", " << bank_end << "]\n";
+      os << "    conflict_degree: " << bank_conflict_map[op].size() << "\n";
+      PipelineVersionName version =
+          ParsePipelineVersionName(std::string(op->name));
+      if (version.valid) {
+        os << "    pipeline_base: " << version.base << "\n";
+        os << "    pipeline_version: " << version.version << "\n";
+        os << "    stage_sibling_conflict_degree: "
+           << stage_sibling_degree[op] << "\n";
+      }
+    }
+    os << "ADDRESS_ASSIGN_DUMP_END\n";
+    EmitAddressAssignDump(os.str());
+  }
   return f;
 }
 

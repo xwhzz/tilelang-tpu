@@ -151,13 +151,21 @@ class LibraryGenerator(object):
         with open(kernel_path, "r") as f:
             kernel_code = f.read()
 
+        start_count = kernel_code.count("tpu_parallel_start();")
+        end_count = kernel_code.count("tpu_parallel_end();")
         sanitized = kernel_code.replace("      tpu_parallel_start(); \n", "")
         sanitized = sanitized.replace("      tpu_parallel_end(); \n", "")
         sanitized = sanitized.replace("tpu_parallel_start(); \n", "")
         sanitized = sanitized.replace("tpu_parallel_end(); \n", "")
 
         if sanitized != kernel_code:
-            logger.info("Stripping TPU pipeline parallel markers for cmodel execution")
+            logger.info(
+                "Stripping TPU pipeline parallel markers for cmodel execution "
+                "(start=%d, end=%d)", start_count, end_count)
+            if start_count != end_count:
+                logger.warning(
+                    "Mismatched TPU pipeline parallel markers before cmodel stripping "
+                    "(start=%d, end=%d)", start_count, end_count)
             with open(kernel_path, "w") as f:
                 f.write(sanitized)
 
