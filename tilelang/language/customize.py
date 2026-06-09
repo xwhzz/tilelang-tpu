@@ -579,13 +579,28 @@ def ppl_reduce_sum_safe(inp, out, dim):
         T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
+@T.macro
+def ppl_reduce_sum_safe_3d(inp, out, dim):
+    inpptr = inp.access_ptr("rw")
+    outptr = out.access_ptr("rw")
+    with T.block("reduce_sum"):
+        tmp_shape = [inp.shape[0], inp.shape[1], 32]
+        tmp_buffer_sum = T.alloc_shared(tmp_shape, inp.dtype)
+        tmp_ptr = tmp_buffer_sum.access_ptr("rw")
+        eu_num = T.int32(32)
+        channel = T.int32(64)
+        align_w = T.ceildiv(inp.shape[2], eu_num) * eu_num
+        stride = T.ceildiv(inp.shape[1], channel) * align_w
+        T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+
+
 def ppl_reduce_sum(inp, out, dim):
-    """Reduce a 2D tile along its second dimension with summation.
+    """Reduce a rank-2/rank-3 tile along its last dimension with summation.
 
     Args:
-        inp: Input tile, typically shaped `(M, N)`.
-        out: Output tile, typically shaped `(M, 1)`.
-        dim: Reduction axis. The current TPU path only supports `dim=1`.
+        inp: Input tile, typically shaped `(M, N)` or `(H, M, N)`.
+        out: Output tile, typically shaped `(M, 1)` or `(H, M, 1)`.
+        dim: Reduction axis. The current TPU path supports the last dimension.
 
     Returns:
         PrimExpr: Handle to the emitted reduction macro call.
@@ -595,12 +610,15 @@ def ppl_reduce_sum(inp, out, dim):
         `T.ppl_reduce_sum(X_shared, Y_shared, dim=1)`
 
     Notes:
-        This op is intended for 2D tiles and currently only supports
-        reduction along `dim=1`.
-        The usual output shape is `(inp.shape[0], 1)`.
+        This op is intended for 2D or 3D local tiles and currently only
+        supports reduction along the last dimension.
     """
-    assert dim == 1, "Only dim=1 is supported for reduction"
-    return ppl_reduce_sum_safe(inp, out, dim)
+    rank = len(inp.shape)
+    assert dim == rank - 1, "Only reduction along the last dim is supported"
+    if rank == 2:
+        return ppl_reduce_sum_safe(inp, out, dim)
+    assert rank == 3, "Only rank-2 and rank-3 tensors are supported for reduction"
+    return ppl_reduce_sum_safe_3d(inp, out, dim)
 
 
 @T.macro
@@ -630,13 +648,30 @@ def ppl_reduce_max_safe(inp, out, dim, clear=True):
         T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
+@T.macro
+def ppl_reduce_max_safe_3d(inp, out, dim, clear=True):
+    inpptr = inp.access_ptr("rw")
+    outptr = out.access_ptr("rw")
+    if clear:
+        T.call_extern("handle", "ppl.fill", outptr, T.float16(float('-inf')))
+    with T.block("reduce_max"):
+        tmp_shape = [inp.shape[0], inp.shape[1], 32]
+        tmp_buffer_max = T.alloc_shared(tmp_shape, inp.dtype)
+        tmp_ptr = tmp_buffer_max.access_ptr("rw")
+        eu_num = T.int32(32)
+        channel = T.int32(64)
+        align_w = T.ceildiv(inp.shape[2], eu_num) * eu_num
+        stride = T.ceildiv(inp.shape[1], channel) * align_w
+        T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
+
+
 def ppl_reduce_max(inp, out, dim, clear=True):
-    """Reduce a 2D tile along its second dimension with max.
+    """Reduce a rank-2/rank-3 tile along its last dimension with max.
 
     Args:
-        inp: Input tile, typically shaped `(M, N)`.
-        out: Output tile, typically shaped `(M, 1)`.
-        dim: Reduction axis. The current TPU path only supports `dim=1`.
+        inp: Input tile, typically shaped `(M, N)` or `(H, M, N)`.
+        out: Output tile, typically shaped `(M, 1)` or `(H, M, 1)`.
+        dim: Reduction axis. The current TPU path supports the last dimension.
         clear: Whether to initialize `out` to `-inf` before reduction.
             Set this to `False` when you intentionally accumulate across tiles.
 
@@ -648,16 +683,18 @@ def ppl_reduce_max(inp, out, dim, clear=True):
         `T.ppl_reduce_max(X_shared, Y_shared, dim=1, clear=True)`
 
     Notes:
-        This op is intended for 2D tiles and currently only supports
-        reduction along `dim=1`.
-        The usual output shape is `(inp.shape[0], 1)`.
+        This op is intended for 2D or 3D local tiles and currently only
+        supports reduction along the last dimension.
         Set `clear=False` only when you intentionally want to keep and update
         the previous contents of `out`.
     """
     # 在函数外部进行检查
-    assert dim == 1, "Only dim=1 is supported"
-    # 调用不含断言的宏函数
-    return ppl_reduce_max_safe(inp, out, dim, clear)
+    rank = len(inp.shape)
+    assert dim == rank - 1, "Only reduction along the last dim is supported"
+    if rank == 2:
+        return ppl_reduce_max_safe(inp, out, dim, clear)
+    assert rank == 3, "Only rank-2 and rank-3 tensors are supported for reduction"
+    return ppl_reduce_max_safe_3d(inp, out, dim, clear)
 
 
 def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
