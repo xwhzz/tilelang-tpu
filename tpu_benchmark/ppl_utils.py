@@ -37,7 +37,7 @@ def _get_tpu_template_dir():
 
 # ── Step 1: ppl-compile .pl → rewritten kernel.c ─────────────────────────────
 
-def compile_pl(pl_path, chip="bm1690", opt_level=2):
+def compile_pl(pl_path, chip="bm1690", opt_level=2, artifact_dir=None):
     pl_path = os.path.abspath(pl_path)
     if not os.path.isfile(pl_path):
         raise FileNotFoundError(f"PL file not found: {pl_path}")
@@ -66,7 +66,16 @@ def compile_pl(pl_path, chip="bm1690", opt_level=2):
         raise FileNotFoundError(
             f"Expected {device_c}, found: {candidates}")
 
-    return _rewrite_kernel_c(device_c)
+    rewritten_c = _rewrite_kernel_c(device_c)
+    if artifact_dir is not None:
+        os.makedirs(artifact_dir, exist_ok=True)
+        basename = os.path.splitext(os.path.basename(pl_path))[0]
+        shutil.copy2(device_c, os.path.join(artifact_dir, basename + "_ppl_device.c"))
+        shutil.copy2(
+            rewritten_c,
+            os.path.join(artifact_dir, basename + "_ppl_kernel_rewritten.c"),
+        )
+    return rewritten_c
 
 
 def _rewrite_kernel_c(device_c_path):
@@ -209,9 +218,6 @@ def _compile_to_so(build_dir, kernel_c_path, mode="pcie"):
     ]
     rpath = f"-Wl,-rpath,{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib"
 
-    TOOLCHAIN = f"{PPL_TOP}/third_party/toolchains_dir/Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1"
-    CROSS_GCC = f"{TOOLCHAIN}/bin/riscv64-unknown-linux-gnu-gcc"
-
     def run(cmd):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
@@ -219,6 +225,49 @@ def _compile_to_so(build_dir, kernel_c_path, mode="pcie"):
 
     # Copy kernel.c into build_dir
     shutil.copy2(kernel_c_path, os.path.join(build_dir, "kernel.c"))
+
+    if mode == "cmodel":
+        run(["/usr/bin/cc", "-D__bm1690__", "-Dlibkernel_EXPORTS", *includes,
+             "-I" + os.path.join(PPL_TOP, "include"),
+             f"-I{PPL_TOP}/runtime/{CHIP}/TPU1686/common/include",
+             "-Wl,--no-undefined", "-O3", "-DNDEBUG", "-fPIC", "-c",
+             os.path.join(build_dir, "kernel.c"),
+             "-o", os.path.join(build_dir, "kernel.o")])
+        run(["/usr/bin/cc", "-D__bm1690__", "-Dlibkernel_EXPORTS", *includes,
+             "-I" + os.path.join(PPL_TOP, "include"),
+             f"-I{PPL_TOP}/runtime/{CHIP}/TPU1686/common/include",
+             "-Wl,--no-undefined", "-O3", "-DNDEBUG", "-fPIC", "-c",
+             f"{PPL_TOP}/runtime/customize/src/ppl_helper.c",
+             "-o", os.path.join(build_dir, "ppl_helper.o")])
+        run(["/usr/bin/cc", "-fPIC", "-Wl,--no-undefined", "-O3", "-DNDEBUG",
+             "-shared", "-Wl,-soname,libkernel.so",
+             "-o", os.path.join(build_dir, "libkernel.so"),
+             os.path.join(build_dir, "kernel.o"),
+             os.path.join(build_dir, "ppl_helper.o"),
+             f"{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib/libtpuv7_emulator.so",
+             "-lm"])
+        run(["g++", f"-D__{CHIP}__", *includes, "-Wl,--no-undefined",
+             "-O3", "-DNDEBUG", "-std=c++11", "-fPIC", "-c",
+             os.path.join(build_dir, "kernel.cpp"),
+             "-o", os.path.join(build_dir, "kernel_host.o")])
+        run(["g++", f"-D__{CHIP}__", *includes, "-Wl,--no-undefined",
+             "-O3", "-DNDEBUG", "-std=c++11", "-fPIC", "-c",
+             os.path.join(build_dir, "main.cpp"),
+             "-o", os.path.join(build_dir, "main.o")])
+        main_so = os.path.join(build_dir, "main.so")
+        run(["g++", "-shared", "-fPIC", "-Wl,--no-undefined",
+             "-o", main_so,
+             os.path.join(build_dir, "kernel_host.o"),
+             os.path.join(build_dir, "main.o"),
+             *lib_paths, rpath,
+             "-ltpuv7_rt", "-lcdm_daemon_emulator", "-lpthread"])
+        return main_so
+
+    if mode != "pcie":
+        raise ValueError(f"Unsupported PPL compile mode: {mode}")
+
+    TOOLCHAIN = f"{PPL_TOP}/third_party/toolchains_dir/Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1"
+    CROSS_GCC = f"{TOOLCHAIN}/bin/riscv64-unknown-linux-gnu-gcc"
 
     # 1) cross-compile kernel.c → kernel.o
     run([CROSS_GCC, "-D__bm1690__", "-Dlibkernel_EXPORTS", *includes,
@@ -298,7 +347,7 @@ _TORCH_TO_PPL_DTYPE = {
 }
 
 
-def compile_ppl_kernel(pl_path, arg_specs, result_idx):
+def compile_ppl_kernel(pl_path, arg_specs, result_idx, mode="pcie", artifact_dir=None):
     """Compile a .pl into a callable kernel via tilelang's host framework.
 
     Args:
@@ -306,11 +355,12 @@ def compile_ppl_kernel(pl_path, arg_specs, result_idx):
         arg_specs: list of (shape_tuple, torch_dtype) for each kernel argument,
                    e.g. [((64,64), torch.float32), ((64,64), torch.float32), ...]
         result_idx: list of output argument indices (0-based)
+        mode: "pcie" for board execution or "cmodel" for TPU emulator
 
     Returns:
         A callable: forward(tensor_0, tensor_1, ...) -> int
     """
-    kernel_c = compile_pl(pl_path)
+    kernel_c = compile_pl(pl_path, artifact_dir=artifact_dir)
 
     build_dir = tempfile.mkdtemp(prefix="ppl_tl_build_")
 
@@ -322,7 +372,7 @@ def compile_ppl_kernel(pl_path, arg_specs, result_idx):
     os.environ["PPL_KERNEL_PATH"] = os.path.join(build_dir, "libkernel.so")
 
     _generate_templates(build_dir, num_args, dtype_map, shapes, result_idx)
-    main_so = _compile_to_so(build_dir, kernel_c)
+    main_so = _compile_to_so(build_dir, kernel_c, mode=mode)
     forward = _make_forward(main_so, result_idx)
 
     return forward
