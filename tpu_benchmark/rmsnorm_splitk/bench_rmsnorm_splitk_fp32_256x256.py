@@ -13,7 +13,7 @@ import tilelang
 import tilelang.language as T
 
 M, N = 256, 256
-BLK_M, BLK_K = 32, 32
+BLK_M, BLK_K = 128, 32
 ATOL, RTOL = 1e-2, 1e-2
 
 
