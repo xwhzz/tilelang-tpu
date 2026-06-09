@@ -122,15 +122,59 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
         `transpose_A` is not recommended in the current TPU path; prefer using
         `transpose_B=True` when a transpose form is needed.
     """
-    Aptr = A.access_ptr("r")
-    Bptr = B.access_ptr("r")
-    Cptr = C.access_ptr("rw")
-    M = C.shape[0]
-    N = C.shape[1]
-    K = A.shape[0] if transpose_A else A.shape[1]
-    K_B = B.shape[1] if transpose_B else B.shape[0]
-    assert K == K_B, "gemm K shape check failed"
-    return T.call_extern("handle", "ppl.gemm", Aptr, Bptr, Cptr, transpose_A, transpose_B, M, N, K)
+    def _extent(data):
+        if isinstance(data, Buffer):
+            return list(data.shape)
+        if isinstance(data, BufferRegion):
+            return [x.extent for x in data.region]
+        if isinstance(data, BufferLoad):
+            return [getattr(index, "lanes", 1) for index in data.indices]
+        raise TypeError(f"Unsupported ppl_gemm operand type: {type(data)}")
+
+    def _matrix_shape(data):
+        shape = _extent(data)
+        assert len(shape) in (2, 3), f"ppl_gemm expects rank-2 or rank-3 tiles, got {shape}"
+        return shape[-2:]
+
+    def _to_region(data, access_type):
+        if isinstance(data, Buffer):
+            return buffer_to_tile_region(data, access_type)
+        if isinstance(data, BufferRegion):
+            return buffer_region_to_tile_region(data, access_type)
+        return buffer_load_to_tile_region(data, access_type, _extent(data))
+
+    A_extent = _extent(A)
+    B_extent = _extent(B)
+    C_extent = _extent(C)
+    assert len(A_extent) == len(B_extent) == len(
+        C_extent), "ppl_gemm expects A/B/C to have the same rank"
+    for A_dim, B_dim, C_dim in zip(A_extent[:-2], B_extent[:-2], C_extent[:-2]):
+        ir.assert_structural_equal(A_dim, B_dim)
+        ir.assert_structural_equal(A_dim, C_dim)
+    A_matrix = _matrix_shape(A)
+    B_matrix = _matrix_shape(B)
+    C_matrix = _matrix_shape(C)
+    M = C_matrix[0]
+    N = C_matrix[1]
+    K = A_matrix[0] if transpose_A else A_matrix[1]
+    K_B = B_matrix[1] if transpose_B else B_matrix[0]
+    A_M = A_matrix[1] if transpose_A else A_matrix[0]
+    B_N = B_matrix[0] if transpose_B else B_matrix[1]
+    ir.assert_structural_equal(A_M, M)
+    ir.assert_structural_equal(B_N, N)
+    ir.assert_structural_equal(K, K_B)
+    return T.call_extern(
+        "handle",
+        "ppl.gemm",
+        _to_region(A, "r"),
+        _to_region(B, "r"),
+        _to_region(C, "rw"),
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+    )
 
 
 def ppl_copy(

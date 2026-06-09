@@ -1242,21 +1242,138 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "}\n";
     } else if (op_name == "ppl.gemm") {
-      auto a_access_data =
-          var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto b_access_data =
-          var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-      auto c_access_data =
-          var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      tl::BufferMap buffer_map;
+      auto is_local_tensor_scope = [](const std::string &scope) {
+        return scope == "shared.dyn" || scope == "local" ||
+               scope == "local.fragment";
+      };
+      auto check_gemm_region_bounds = [&, this](const tir::Buffer &buffer,
+                                                const Array<Range> &ranges,
+                                                const char *operand_name) {
+        ICHECK_LE(ranges.size(), buffer->shape.size())
+            << "ppl.gemm " << operand_name << " rank mismatch: region rank "
+            << ranges.size() << ", buffer rank " << buffer->shape.size();
+        arith::Analyzer analyzer;
+        for (const auto &loop_range : loop_var_ranges_) {
+          analyzer.Bind(loop_range.first, loop_range.second);
+        }
+        size_t dim_offset = buffer->shape.size() - ranges.size();
+        for (size_t i = 0; i < ranges.size(); ++i) {
+          const Range &range = ranges[i];
+          PrimExpr raw_min = range->min;
+          PrimExpr min = raw_min.as<RampNode>()
+                             ? raw_min.as<RampNode>()->base
+                             : raw_min;
+          min = analyzer.Simplify(min);
+          PrimExpr upper = analyzer.Simplify(min + range->extent);
+          PrimExpr shape_dim = buffer->shape[dim_offset + i];
+          bool lower_ok = analyzer.CanProve(
+              min >= make_const(min.dtype(), 0),
+              arith::ProofStrength::kSymbolicBound);
+          bool upper_ok = analyzer.CanProve(
+              upper <= shape_dim, arith::ProofStrength::kSymbolicBound);
+          ICHECK(lower_ok && upper_ok)
+              << "ppl.gemm " << operand_name << " region may be out of bounds "
+              << "for buffer " << buffer->name << " at dim "
+              << (dim_offset + i) << ": min=" << min
+              << ", extent=" << range->extent << ", upper=" << upper
+              << ", shape_dim=" << shape_dim << ".";
+        }
+      };
+      auto process_gemm_operand = [&, this](const PrimExpr &expr,
+                                            const char *operand_name)
+          -> std::tuple<std::string, DataType, int> {
+        auto call = expr.as<CallNode>();
+        ICHECK(call) << "ppl.gemm " << operand_name
+                     << " expects access_ptr or tl.region";
+
+        if (call->op.same_as(builtin::tvm_access_ptr())) {
+          auto var = call->args[1].as<VarNode>();
+          ICHECK(var) << "ppl.gemm " << operand_name
+                      << " access_ptr missing buffer var";
+          auto access_data = var_idmap_[var];
+          auto dtype = call->args[0].as<CallNode>()->dtype;
+          return std::make_tuple(access_data, dtype, 1);
+        }
+
+        ICHECK(call->op.same_as(tl::RegionOp::Get()))
+            << "ppl.gemm " << operand_name
+            << " expects access_ptr or tl.region";
+        tl::RegionOp region(call->args, buffer_map);
+        auto buffer = region.GetBuffer();
+        ICHECK(is_local_tensor_scope(buffer.scope()))
+            << "ppl.gemm only supports local/shared operands, got scope "
+            << buffer.scope();
+        auto ranges = region.GetRanges();
+        ICHECK(ranges.size() == 2 || ranges.size() == 3)
+            << "ppl.gemm only supports rank-2 or rank-3 local regions, got "
+            << ranges.size();
+        check_gemm_region_bounds(buffer, ranges, operand_name);
+        int batch_extent = 1;
+        if (ranges.size() == 3) {
+          batch_extent =
+              GetIntImmValueForDim4(ranges[0]->extent, "PPL gemm batch");
+        }
+
+        auto parent_var = var_idmap_[buffer->data.get()];
+        ICHECK(!parent_var.empty())
+            << "ppl.gemm " << operand_name
+            << " failed to find local buffer in var_idmap: " << buffer->name;
+        std::string view_var =
+            name_supply_->FreshName(buffer->data->name_hint);
+        std::string view_shape =
+            vector2string(LowerRegionToDim4(ranges, true));
+        std::string dtype = TargetDTypeName(buffer->dtype);
+        int bytes_size = TargetDTypeBytes(buffer->dtype);
+        std::vector<std::string> strides = {
+            parent_var + ".stride.n", parent_var + ".stride.c",
+            parent_var + ".stride.h", parent_var + ".stride.w"};
+        std::vector<int> stride_idx =
+            StrideIndicesForRank(ranges.size(), true);
+        std::string min_expr;
+        for (size_t i = 0; i < ranges.size(); ++i) {
+          auto range = ranges[i];
+          const PrimExpr &e = range->min;
+          std::string idx_str;
+          if (const RampNode *ramp = e.as<RampNode>()) {
+            idx_str = PrintExpr(ramp->base);
+          } else {
+            idx_str = PrintExpr(e);
+          }
+          min_expr += "(" + idx_str + ") * " + strides[stride_idx[i]] + "+";
+        }
+        min_expr[min_expr.size() - 1] = ' ';
+        min_expr = "(" + min_expr + ") * " + std::to_string(bytes_size);
+        this->PrintIndent();
+        this->stream << "__ppl_tensor_info " << view_var << " = {.shape = "
+                     << view_shape << ", .stride = " << parent_var
+                     << ".stride, .addr = " << parent_var << ".addr + "
+                     << min_expr << ", .dtype = " << dtype
+                     << ", .mode = 0, .size = 1, .offset = " << min_expr
+                     << ", .unsigned_flag = 0, .default_stride = "
+                     << parent_var << ".default_stride};\n";
+        return std::make_tuple(view_var, buffer->dtype, batch_extent);
+      };
+
+      auto [a_access_data, a_dtype, a_batch] =
+          process_gemm_operand(op->args[1], "A");
+      auto [b_access_data, b_dtype, b_batch] =
+          process_gemm_operand(op->args[2], "B");
+      auto [c_access_data, c_dtype, c_batch] =
+          process_gemm_operand(op->args[3], "C");
 
       auto M = Downcast<IntImm>(op->args[6])->value;
       auto N = Downcast<IntImm>(op->args[7])->value;
       auto K = Downcast<IntImm>(op->args[8])->value;
       auto trans_B = Downcast<Bool>(op->args[5])->value;
 
-      auto a_dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto b_dtype = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      auto c_dtype = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      ICHECK(b_dtype == a_dtype)
+          << "ppl.gemm expects A and B to have the same dtype, got "
+          << a_dtype << " and " << b_dtype;
+      ICHECK_EQ(a_batch, b_batch)
+          << "ppl.gemm expects A and B to have the same batch extent";
+      ICHECK_EQ(a_batch, c_batch)
+          << "ppl.gemm expects A and C to have the same batch extent";
       const char* left_right_dtype = AsBDTypeStr(a_dtype);
       // 非转置路径：累加需要数据类型为FP32
       const char* output_dtype_accum = "DT_FP32"; 
@@ -1266,17 +1383,59 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
 
       std::string M_K_N = std::to_string(M) + ", " + std::to_string(K) + ", " +
                           std::to_string(N);
-      this->PrintIndent();
-      if (!trans_B)
-        this->stream << "tpu_bdc_fp_mm(" << c_access_data << ".addr, "
-                     << a_access_data << ".addr, " << b_access_data << ".addr, "
-                     << M_K_N << ", " << output_dtype_accum << ", "  
-                     << left_right_dtype << ", true);\n";
-      else
-        this->stream << "tpu_bdc_fp_mm_R_trans(" << c_access_data << ".addr, "
-                     << a_access_data << ".addr, " << b_access_data << ".addr, "
-                     << M_K_N << ", " << output_dtype_trans << ", "
-                     << left_right_dtype << ");\n";
+      auto emit_gemm_call = [&](const std::string &c_addr,
+                                const std::string &a_addr,
+                                const std::string &b_addr) {
+        this->PrintIndent();
+        if (!trans_B)
+          this->stream << "tpu_bdc_fp_mm(" << c_addr << ", " << a_addr
+                       << ", " << b_addr << ", " << M_K_N << ", "
+                       << output_dtype_accum << ", " << left_right_dtype
+                       << ", true);\n";
+        else
+          this->stream << "tpu_bdc_fp_mm_R_trans(" << c_addr << ", "
+                       << a_addr << ", " << b_addr << ", " << M_K_N
+                       << ", " << output_dtype_trans << ", "
+                       << left_right_dtype << ");\n";
+      };
+      if (a_batch == 1) {
+        emit_gemm_call(c_access_data + ".addr", a_access_data + ".addr",
+                       b_access_data + ".addr");
+      } else {
+        int a_bytes = TargetDTypeBytes(a_dtype);
+        int b_bytes = TargetDTypeBytes(b_dtype);
+        int c_bytes = TargetDTypeBytes(c_dtype);
+        this->PrintIndent();
+        this->stream << "{\n";
+        {
+          int batch_scope = this->BeginScope();
+          this->PrintIndent();
+          this->stream << "for (int __gemm_batch = 0; __gemm_batch < "
+                       << a_batch << "; ++__gemm_batch) {\n";
+          {
+            int loop_scope = this->BeginScope();
+            this->PrintIndent();
+            this->stream << "local_addr_t __a_addr = " << a_access_data
+                         << ".addr + __gemm_batch * " << a_access_data
+                         << ".stride.n * " << a_bytes << ";\n";
+            this->PrintIndent();
+            this->stream << "local_addr_t __b_addr = " << b_access_data
+                         << ".addr + __gemm_batch * " << b_access_data
+                         << ".stride.n * " << b_bytes << ";\n";
+            this->PrintIndent();
+            this->stream << "local_addr_t __c_addr = " << c_access_data
+                         << ".addr + __gemm_batch * " << c_access_data
+                         << ".stride.n * " << c_bytes << ";\n";
+            emit_gemm_call("__c_addr", "__a_addr", "__b_addr");
+            this->EndScope(loop_scope);
+          }
+          this->PrintIndent();
+          this->stream << "}\n";
+          this->EndScope(batch_scope);
+        }
+        this->PrintIndent();
+        this->stream << "}\n";
+      }
     } else if (op_name == "ppl.sub") {
       handle_elementwise("tpu_bdc_fp_sub", true);
     } else if (op_name == "ppl.mul") {
