@@ -100,5 +100,5 @@ tilelang/jit/adapter/cython/.cycache
 /src/tl_templates/tpu/main.cpp
 /src/tl_templates/tpu/main.so
 
-# tpu_benchmark compiled PPL plan files
-tpu_benchmark/**/pl/
+# tpu_benchmark generated benchmark outputs
+tpu_benchmark/results/
