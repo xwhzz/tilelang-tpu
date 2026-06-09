@@ -572,7 +572,7 @@ __KERNEL__ void main_kernel({ppl_t} *ptr_a, {ppl_t} *ptr_b, {ppl_t} *ptr_c) {{
         dim4 b_offset = {{0, idx_k, 0, idx_n}};
 {load_cast_a}
 {load_cast_b}
-        tiu::fmm(c_local, a_fp16, b_fp16, true);
+        tiu::fmm2(c_local, a_fp16, b_fp16, true, DT_FP32);
       }}
 {store_cast_c}
     }}
@@ -634,7 +634,7 @@ __KERNEL__ void main_kernel({ppl_t} *ptr_q, {ppl_t} *ptr_k, {ppl_t} *ptr_v,
   int heads = {heads};
   int seq_len = {seq_len};
   int dim = {dim};
-  float sqrt_d = 1.0f / sqrtf((float)dim);
+  float sqrt_d = 1.0f / sqrt((float)dim);
   int block_m = {block_M};
   int block_k = {block_N};
   int block_h = heads;
@@ -826,7 +826,12 @@ def generate_pl(op, dtype, shape):
         )
     elif op == "rmsnorm":
         M, N = shape["M"], shape["N"]
-        block_M = min(32, M)
+        if N >= 1024:
+            block_M = min(32, M)
+        elif N == 256:
+            block_M = min(128, M)
+        else:
+            block_M = min(64, M)
         if dtype == "float32":
             load_block = (
                 "    auto in_local = make_tensor<fp32>(block_shape, in_shape);\n"
