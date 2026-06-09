@@ -354,6 +354,29 @@ def ppl_mul(out, inp1, inp2):
     return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
 
+def ppl_max(out, inp1, inp2):
+    """Compute elementwise maximum `out = max(inp1, inp2)`.
+
+    Args:
+        out: Output tile.
+        inp1: Left-hand input tile.
+        inp2: Right-hand input tile.
+
+    Returns:
+        PrimExpr: Handle to the emitted max extern call.
+
+    Example:
+        `T.ppl_max(scores_max, scores_max_prev, block_max)`
+
+    Notes:
+        The usual usage is that all tiles have the same shape.
+    """
+    outptr = out.access_ptr("w")
+    inpptr1 = inp1.access_ptr("r")
+    inpptr2 = inp2.access_ptr("r")
+    return T.call_extern("handle", "ppl.max", outptr, inpptr1, inpptr2)
+
+
 @T.macro
 def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
     """Compute `exp(out)` in place (loads coeff+table each call).

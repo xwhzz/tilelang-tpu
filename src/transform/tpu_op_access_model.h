@@ -111,7 +111,8 @@ inline void AddTpuOpPhase(TpuCallExternAccessInfo *info, std::string name,
 
 inline bool IsTpuElementwisePplOp(const std::string &op_name) {
   return op_name == "ppl.sub" || op_name == "ppl.mul" ||
-         op_name == "ppl.add" || op_name == "ppl.div";
+         op_name == "ppl.add" || op_name == "ppl.div" ||
+         op_name == "ppl.max";
 }
 
 inline bool IsTpuElementwiseConstPplOp(const std::string &op_name) {
