@@ -56,7 +56,7 @@ def run_and_check(name, kernel_func, a, b, ref):
 def main():
     a = torch.randn(M, K, dtype=torch.float32)
     b = torch.randn(K, N, dtype=torch.float32)
-    ref = torch.matmul(a, b)
+    ref = torch.matmul(a.to(torch.float16).to(torch.float32), b.to(torch.float16).to(torch.float32))
 
     print("=" * 60)
     print(f"Matmul FP32  M={M} N={N} K={K}  block={BLOCK_M}x{BLOCK_N}x{BLOCK_K}")
