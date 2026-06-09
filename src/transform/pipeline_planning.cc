@@ -833,7 +833,8 @@ private:
       return;
     }
 
-    if (info.op_name == "ppl.exp" || info.op_name == "ppl.sigmoid") {
+    if (info.op_name == "ppl.exp" || info.op_name == "ppl.exp_compute" ||
+        info.op_name == "ppl.sigmoid") {
       int64_t elements = 0;
       if (TryEstimateOperandElements(op, 1, &elements)) {
         // Transcendental PPL ops are BDC-heavy and table/workspace-backed.
@@ -1243,7 +1244,10 @@ private:
         if (IsTpuReducePplOp(op_info.op_name)) {
           has_reduce = true;
         }
-        if (op_info.op_name == "ppl.exp" || op_info.op_name == "ppl.sigmoid") {
+        if (op_info.op_name == "ppl.exp" ||
+            op_info.op_name == "ppl.exp_load_coeff" ||
+            op_info.op_name == "ppl.exp_compute" ||
+            op_info.op_name == "ppl.sigmoid") {
           has_exp_or_sigmoid = true;
         }
         if (!IsSimpleGemmCompanionOp(op_info.op_name)) {

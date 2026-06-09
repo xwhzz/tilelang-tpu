@@ -360,7 +360,7 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
 
     Despite the name `ppl_exp2`, this op computes natural exponential
     `exp(x)`, not `2^x`. Use `ppl_exp_load_coeff` + `ppl_exp_compute`
-    to hoist the coeff/table loads outside a loop.
+    only when the load/compute placement must be controlled explicitly.
     """
     buffer = out.access_ptr("rw")
     work0ptr = work0.access_ptr("rw")
@@ -372,7 +372,11 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
 
 @T.macro
 def ppl_exp_load_coeff(coeff, table):
-    """Load exp coeff+table into SRAM (call once, outside the inner loop).
+    """Load exp coeff+table into SRAM for the following exp compute.
+
+    On BM1690, `tpu_bdc_fp32_exp` uses the coeff/table buffers as scratch.
+    Reload them immediately before each `ppl_exp_compute`; hoisting this load
+    across an exp compute can corrupt later exp results.
 
     Args:
         coeff: FP32 coefficient buffer shaped `(64, 32)`.
@@ -385,10 +389,10 @@ def ppl_exp_load_coeff(coeff, table):
 
 @T.macro
 def ppl_exp_compute(out, work0, work1, coeff, table):
-    """Compute `exp(out)` in place; coeff+table must already be loaded.
+    """Compute `exp(out)` in place after `ppl_exp_load_coeff`.
 
-    Call `ppl_exp_load_coeff(coeff, table)` once before entering the loop,
-    then call this macro inside the loop to avoid redundant SRAM loads.
+    The coeff/table buffers should be reloaded immediately before this call on
+    BM1690 because the backend exp routine may modify them.
     """
     buffer = out.access_ptr("rw")
 

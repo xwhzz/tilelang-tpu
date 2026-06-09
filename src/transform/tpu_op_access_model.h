@@ -206,6 +206,12 @@ inline void PopulateTpuCallExternPhases(TpuCallExternAccessInfo *info) {
                   {4, 5}, {4, 5}, false, true);
     AddTpuOpPhase(info, "exp_compute", "bdc", "elementwise", {1, 2, 3, 4, 5},
                   {1}, {2, 3, 4, 5}, true, true);
+  } else if (op_name == "ppl.exp_load_coeff") {
+    AddTpuOpPhase(info, "exp_table_load", "bdc", "workspace_init", {},
+                  {1, 2}, {1, 2}, true, false);
+  } else if (op_name == "ppl.exp_compute") {
+    AddTpuOpPhase(info, "exp_compute", "bdc", "elementwise",
+                  {1, 2, 3, 4, 5}, {1}, {2, 3, 4, 5}, true, false);
   } else if (op_name == "ppl.sigmoid") {
     AddTpuOpPhase(info, "sigmoid_table_load", "bdc", "workspace_init", {},
                   {5, 6}, {5, 6}, false, true);
@@ -256,6 +262,16 @@ inline TpuCallExternAccessInfo GetTpuCallExternAccessInfo(const CallNode *op) {
     AddOperandAccess(&info, 2, TpuBufferAccessKind::kWrite);
     AddOperandAccess(&info, 3, TpuBufferAccessKind::kReadWrite);
   } else if (info.op_name == "ppl.exp") {
+    info.conservative = true;
+    for (size_t i = 1; i <= 5; ++i) {
+      AddOperandAccess(&info, i, TpuBufferAccessKind::kConservative);
+    }
+  } else if (info.op_name == "ppl.exp_load_coeff") {
+    info.conservative = true;
+    for (size_t i = 1; i <= 2; ++i) {
+      AddOperandAccess(&info, i, TpuBufferAccessKind::kConservative);
+    }
+  } else if (info.op_name == "ppl.exp_compute") {
     info.conservative = true;
     for (size_t i = 1; i <= 5; ++i) {
       AddOperandAccess(&info, i, TpuBufferAccessKind::kConservative);
