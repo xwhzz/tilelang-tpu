@@ -217,30 +217,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
             # TODO: 暂时使用ctypes，后续考虑更高效cython
             def lambda_forward(*args):
                 host_tensors = [arg.detach().cpu().contiguous() for arg in args]
-                arg_buffers = []
-                arg_sizes = []
-                for tensor in host_tensors:
-                    storage = tensor.untyped_storage()
-                    nbytes = storage.nbytes()
-                    raw = bytes(storage)
-                    buf = ctypes.create_string_buffer(raw, nbytes)
-                    arg_buffers.append(buf)
-                    arg_sizes.append(nbytes)
 
                 argv = (ctypes.c_void_p * len(args))()
-                for i, buf in enumerate(arg_buffers):
-                    argv[i] = ctypes.cast(buf, ctypes.c_void_p).value
+                for i, tensor in enumerate(host_tensors):
+                    argv[i] = ctypes.c_void_p(tensor.data_ptr()).value
 
                 ret = self.lib.tilelang_tpu_run(argv)
                 args_list = list(args)
                 for i in self.result_idx:
-                    result_tensor = torch.empty(
-                        args[i].shape, dtype=args[i].dtype, device="cpu")
-                    ctypes.memmove(
-                        result_tensor.data_ptr(),
-                        arg_buffers[i],
-                        arg_sizes[i])
-                    args_list[i][...] = result_tensor.to(args_list[i].device)
+                    args_list[i][...] = host_tensors[i].to(args_list[i].device)
 
                 return ret
             self.func = lambda_forward

@@ -275,29 +275,14 @@ def _make_forward(main_so_path, result_idx):
 
     def forward(*args):
         host_tensors = [arg.detach().cpu().contiguous() for arg in args]
-        arg_buffers = []
-        arg_sizes = []
-        for tensor in host_tensors:
-            storage = tensor.untyped_storage()
-            nbytes = storage.nbytes()
-            raw = bytes(storage)
-            buf = ctypes.create_string_buffer(raw, nbytes)
-            arg_buffers.append(buf)
-            arg_sizes.append(nbytes)
 
         argv = (ctypes.c_void_p * len(args))()
-        for i, buf in enumerate(arg_buffers):
-            argv[i] = ctypes.cast(buf, ctypes.c_void_p).value
+        for i, tensor in enumerate(host_tensors):
+            argv[i] = ctypes.c_void_p(tensor.data_ptr()).value
 
         ret = lib.tilelang_tpu_run(argv)
         for i in result_idx:
-            result_tensor = torch.empty(
-                args[i].shape, dtype=args[i].dtype, device="cpu")
-            ctypes.memmove(
-                result_tensor.data_ptr(),
-                arg_buffers[i],
-                arg_sizes[i])
-            args[i][...] = result_tensor.to(args[i].device)
+            args[i][...] = host_tensors[i].to(args[i].device)
         return ret
 
     return forward
