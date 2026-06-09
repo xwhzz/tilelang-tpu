@@ -513,6 +513,11 @@ public:
   }
 
 private:
+  struct LoopUseContext {
+    uint32_t start_loc = 0;
+    std::unordered_set<const BufferNode *> buffers;
+  };
+
   class OpScope {
   public:
     explicit OpScope(BufferUseCollector *collector) : collector_(collector) {
@@ -571,6 +576,9 @@ private:
     if (it == live_ranges_->end()) {
       return;
     }
+    for (auto &loop_ctx : loop_use_stack_) {
+      loop_ctx.buffers.insert(buffer);
+    }
     if (inside_tpu_parallel_region_) {
       parallel_region_buffers_.insert(buffer);
     }
@@ -601,6 +609,26 @@ private:
     } else {
       range.start = std::min<uint32_t>(range.start, current_loc_);
       range.end = std::max<uint32_t>(range.end, current_loc_ + 1);
+    }
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    LoopUseContext loop_ctx;
+    loop_ctx.start_loc = loc_ + 1;
+    loop_use_stack_.push_back(std::move(loop_ctx));
+    StmtExprVisitor::VisitStmt_(op);
+    LoopUseContext finished_loop = std::move(loop_use_stack_.back());
+    loop_use_stack_.pop_back();
+
+    uint32_t loop_end = loc_ + 1;
+    for (const BufferNode *buffer : finished_loop.buffers) {
+      auto it = live_ranges_->find(buffer);
+      if (it == live_ranges_->end()) {
+        continue;
+      }
+      if (it->second.start < finished_loop.start_loc) {
+        it->second.end = std::max<uint32_t>(it->second.end, loop_end);
+      }
     }
   }
 
@@ -771,6 +799,7 @@ private:
   bool inside_tpu_parallel_region_ = false;
   uint32_t parallel_region_start_loc_ = 0;
   std::unordered_set<const BufferNode *> parallel_region_buffers_;
+  std::vector<LoopUseContext> loop_use_stack_;
 };
 
 PrimFunc InferAddress(PrimFunc f) {
