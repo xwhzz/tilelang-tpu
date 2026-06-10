@@ -13,7 +13,7 @@ def topk_kernel(length, K, descended=True, dtype="float32"):
         Indices: T.Tensor((length,), "int32"),  # HAU 写入 length 个；前 K 个是 top-K index
     ):
         with T.Kernel(1, 1, is_cpu=True) as (bx, by):
-            T.ppl_topk(Output, Indices, Input, K, descended_int, length)
+            T.topk(Output, Indices, Input, K, descended_int, length)
 
     return main_kernel_inner
 

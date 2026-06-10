@@ -17,15 +17,9 @@ def sigmoid_kernel(Block_w, Block_c, C, W, dtype="float32", accum_dtype="float32
 			x = T.alloc_shared(block_shape, accum_dtype)
 			out = T.alloc_shared(block_shape, accum_dtype)
 
-			# Temporary buffers required by ppl_sigmoid implementation.
-			work0 = T.alloc_shared(block_shape, accum_dtype)
-			work1 = T.alloc_shared(block_shape, accum_dtype)
-			coeff = T.alloc_shared([64, 32], accum_dtype)
-			table = T.alloc_shared([64, 192], accum_dtype)
-
-			T.ppl_copy(G_in[bx * Block_c, by * Block_w], x)
-			T.ppl_sigmoid(out, x, work0, work1, coeff, table)
-			T.ppl_copy(out, G_out[bx * Block_c, by * Block_w])
+			T.copy(G_in[bx * Block_c, by * Block_w], x)
+			T.sigmoid(out, x)
+			T.copy(out, G_out[bx * Block_c, by * Block_w])
 
 	return main_kernel_inner
 

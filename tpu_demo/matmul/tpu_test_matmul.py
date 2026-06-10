@@ -19,13 +19,13 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
 
-            T.ppl_fill(C_shared, T.float32(0))
+            T.fill(C_shared, T.float32(0))
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
-                T.ppl_copy(A[by * block_M, k * block_K], A_shared)
-                T.ppl_copy(B[k * block_K, bx * block_N], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_shared)
 
-            T.ppl_copy(C_shared, C[by * block_M, bx * block_N])
+            T.copy(C_shared, C[by * block_M, bx * block_N])
     return main_kernel_inner
 
 

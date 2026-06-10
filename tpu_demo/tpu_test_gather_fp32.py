@@ -13,7 +13,7 @@ def gather_kernel(num_rows, hidden_size, num_indices, dtype="float32"):
         Output: T.Tensor((num_indices, hidden_size), dtype),
     ):
         with T.Kernel(1, 1, is_cpu=True) as (bx, by):
-            T.ppl_gather(Output, Param, Index, num_rows)
+            T.gather(Output, Param, Index, num_rows)
 
     return main_kernel_inner
 

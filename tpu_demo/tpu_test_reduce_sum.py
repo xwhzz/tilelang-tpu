@@ -14,14 +14,14 @@ def reduce_sum(M, N, block_M, block_N, dtype="float16", accum_dtype="float16"):
             X_shared = T.alloc_shared((block_M, block_N), dtype)
             Y_shared = T.alloc_shared((block_M, 1), accum_dtype)
             # 初始化 Y_shared 为最小值
-            T.ppl_fill(Y_shared, T.float32(float(0)))
+            T.fill(Y_shared, T.float32(float(0)))
             # 复制输入数据到共享内存
-            T.ppl_copy(X[by * block_M, 0], X_shared)
+            T.copy(X[by * block_M, 0], X_shared)
             # 执行 reduce_max 操作
             # 参数说明：输入张量，输出张量，沿哪个维度执行(1表示列方向)
-            T.ppl_reduce_sum(X_shared, Y_shared, 1)
+            T.reduce_sum(X_shared, Y_shared, 1)
             # 将结果从共享内存复制回全局内存
-            T.ppl_copy(Y_shared, Y[by * block_M, 0])
+            T.copy(Y_shared, Y[by * block_M, 0])
     
     return main_kernel_inner
 
