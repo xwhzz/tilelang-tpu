@@ -62,7 +62,14 @@ def test_simple_pipeline():
                     32,
                     annotations={
                         "software_pipeline_order": [0, 1, 2],
-                        "software_pipeline_stage": [3, 3, 3]
+                        "software_pipeline_stage": [0, 0, 1],
+                        "tl_pipeline_buffer_versions": {
+                            "A": 1,
+                            "A_shared": 2,
+                            "B": 1,
+                            "B_shared": 2,
+                            "C_local": 1,
+                        },
                     }):
                 T.copy(A[by * 128, ko * 32], A_shared)
                 T.copy(B[ko * 32, bx * 128], B_shared)
@@ -157,13 +164,13 @@ def test_tpu_stage_search_and_buffer_version_hints():
             B_shared = T.alloc_shared((32, 32), "float16")
             C_shared = T.alloc_shared((32, 32), "float32")
 
-            T.ppl_fill(C_shared, T.float32(0))
+            T.fill(C_shared, T.float32(0))
             for ko in T.Pipelined(2, num_stages=2):
-                T.ppl_copy(A[by * 32, ko * 32], A_shared)
-                T.ppl_copy(B[ko * 32, bx * 32], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
+                T.copy(A[by * 32, ko * 32], A_shared)
+                T.copy(B[ko * 32, bx * 32], B_shared)
+                T.gemm(A_shared, B_shared, C_shared)
 
-            T.ppl_copy(C_shared, C[by * 32, bx * 32])
+            T.copy(C_shared, C[by * 32, bx * 32])
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_stage_search_", suffix=".txt")
     os.close(fd)
@@ -237,11 +244,11 @@ def test_tpu_store_in_loop_stage_search_policy_guard():
             C_shared = T.alloc_shared((32, 32), "float32")
 
             for tile in T.Pipelined(4, num_stages=3):
-                T.ppl_copy(A[tile * 32, 0], A_shared)
-                T.ppl_copy(B[tile * 32, 0], B_shared)
-                T.ppl_fill(C_shared, T.float32(0))
-                T.ppl_gemm(A_shared, B_shared, C_shared)
-                T.ppl_copy(C_shared, C[tile * 32, 0])
+                T.copy(A[tile * 32, 0], A_shared)
+                T.copy(B[tile * 32, 0], B_shared)
+                T.fill(C_shared, T.float32(0))
+                T.gemm(A_shared, B_shared, C_shared)
+                T.copy(C_shared, C[tile * 32, 0])
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_store_loop_policy_", suffix=".txt")
     os.close(fd)
@@ -287,8 +294,8 @@ def test_tpu_copy_transaction_pre_codegen_falls_back_without_error():
         with T.Kernel(1, 1, is_cpu=True):
             scratch = T.alloc_shared((32, 32), "float16")
             for ko in T.Pipelined(1, num_stages=2):
-                T.ppl_copy(A, C)
-                T.ppl_fill(scratch, T.float32(0))
+                T.copy(A, C)
+                T.fill(scratch, T.float32(0))
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_copy_fallback_", suffix=".txt")
     os.close(fd)
@@ -326,13 +333,13 @@ def test_tpu_stage_aware_address_assign_dump():
             B_shared = T.alloc_shared((32, 32), "float16")
             C_shared = T.alloc_shared((32, 32), "float32")
 
-            T.ppl_fill(C_shared, T.float32(0))
+            T.fill(C_shared, T.float32(0))
             for ko in T.Pipelined(2, num_stages=2):
-                T.ppl_copy(A[by * 32, ko * 32], A_shared)
-                T.ppl_copy(B[ko * 32, bx * 32], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
+                T.copy(A[by * 32, ko * 32], A_shared)
+                T.copy(B[ko * 32, bx * 32], B_shared)
+                T.gemm(A_shared, B_shared, C_shared)
 
-            T.ppl_copy(C_shared, C[by * 32, bx * 32])
+            T.copy(C_shared, C[by * 32, bx * 32])
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_address_assign_", suffix=".txt")
     os.close(fd)
@@ -374,14 +381,14 @@ def test_tpu_mixed_gemm_policy_disables_gemm_heavy_optimizations():
             C_shared = T.alloc_shared((32, 32), "float32")
             tmp = T.alloc_shared((32, 32), "float32")
 
-            T.ppl_fill(C_shared, T.float32(0))
+            T.fill(C_shared, T.float32(0))
             for ko in T.Pipelined(2, num_stages=2):
-                T.ppl_copy(A[by * 32, ko * 32], A_shared)
-                T.ppl_copy(B[ko * 32, bx * 32], B_shared)
-                T.ppl_gemm(A_shared, B_shared, C_shared)
-                T.ppl_mul(tmp, C_shared, C_shared)
+                T.copy(A[by * 32, ko * 32], A_shared)
+                T.copy(B[ko * 32, bx * 32], B_shared)
+                T.gemm(A_shared, B_shared, C_shared)
+                T.mul(tmp, C_shared, C_shared)
 
-            T.ppl_copy(C_shared, C[by * 32, bx * 32])
+            T.copy(C_shared, C[by * 32, bx * 32])
 
     cert_fd, cert_path = tempfile.mkstemp(prefix="tl_tpu_mixed_policy_", suffix=".txt")
     dump_fd, dump_path = tempfile.mkstemp(prefix="tl_tpu_mixed_address_", suffix=".txt")
@@ -452,38 +459,38 @@ def test_tpu_attention_mixed_overlap_window_certificate():
             acc_o = T.alloc_shared((2, 8), "float32")
             scores_sum = T.alloc_shared((2, 1), "float32")
 
-            T.ppl_fill(acc_o, T.float32(0))
+            T.fill(acc_o, T.float32(0))
             for k in T.Pipelined(2, num_stages=1):
                 with T.block("load_k"):
                     T.reads(K[k * 2:k * 2 + 2, 0:8])
                     T.writes(K_shared[0:2, 0:8])
-                    T.ppl_copy(K[k * 2, 0], K_shared)
+                    T.copy(K[k * 2, 0], K_shared)
                 with T.block("fill_scores"):
                     T.reads()
                     T.writes(acc_s[0:2, 0:2])
-                    T.ppl_fill(acc_s, T.float32(0))
+                    T.fill(acc_s, T.float32(0))
                 with T.block("score_gemm"):
                     T.reads(Q_shared[0:2, 0:8], K_shared[0:2, 0:8], acc_s[0:2, 0:2])
                     T.writes(acc_s[0:2, 0:2])
-                    T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True)
                 with T.block("softmax_reduce"):
                     T.reads(acc_s[0:2, 0:2])
                     T.writes(scores_sum[0:2, 0:1])
-                    T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
+                    T.reduce_sum(acc_s, scores_sum, dim=1)
                 with T.block("cast_scores"):
                     T.reads(acc_s[0:2, 0:2])
                     T.writes(acc_s_cast[0:2, 0:2])
-                    T.ppl_copy(acc_s, acc_s_cast)
+                    T.copy(acc_s, acc_s_cast)
                 with T.block("load_v"):
                     T.reads(V[k * 2:k * 2 + 2, 0:8])
                     T.writes(V_shared[0:2, 0:8])
-                    T.ppl_copy(V[k * 2, 0], V_shared)
+                    T.copy(V[k * 2, 0], V_shared)
                 with T.block("output_gemm"):
                     T.reads(acc_s_cast[0:2, 0:2], V_shared[0:2, 0:8], acc_o[0:2, 0:8])
                     T.writes(acc_o[0:2, 0:8])
-                    T.ppl_gemm(acc_s_cast, V_shared, acc_o)
+                    T.gemm(acc_s_cast, V_shared, acc_o)
 
-            T.ppl_copy(acc_o, O)
+            T.copy(acc_o, O)
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_attention_windows_", suffix=".txt")
     os.close(fd)
@@ -544,38 +551,38 @@ def test_tpu_attention_window_b_skips_fp32_local_load():
             acc_o = T.alloc_shared((2, 8), "float32")
             scores_sum = T.alloc_shared((2, 1), "float32")
 
-            T.ppl_fill(acc_o, T.float32(0))
+            T.fill(acc_o, T.float32(0))
             for k in T.Pipelined(2, num_stages=1):
                 with T.block("load_k"):
                     T.reads(K[k * 2:k * 2 + 2, 0:8])
                     T.writes(K_shared[0:2, 0:8])
-                    T.ppl_copy(K[k * 2, 0], K_shared)
+                    T.copy(K[k * 2, 0], K_shared)
                 with T.block("fill_scores"):
                     T.reads()
                     T.writes(acc_s[0:2, 0:2])
-                    T.ppl_fill(acc_s, T.float32(0))
+                    T.fill(acc_s, T.float32(0))
                 with T.block("score_gemm"):
                     T.reads(Q_shared[0:2, 0:8], K_shared[0:2, 0:8], acc_s[0:2, 0:2])
                     T.writes(acc_s[0:2, 0:2])
-                    T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True)
                 with T.block("softmax_reduce"):
                     T.reads(acc_s[0:2, 0:2])
                     T.writes(scores_sum[0:2, 0:1])
-                    T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
+                    T.reduce_sum(acc_s, scores_sum, dim=1)
                 with T.block("cast_scores"):
                     T.reads(acc_s[0:2, 0:2])
                     T.writes(acc_s_cast[0:2, 0:2])
-                    T.ppl_copy(acc_s, acc_s_cast)
+                    T.copy(acc_s, acc_s_cast)
                 with T.block("load_v"):
                     T.reads(V[k * 2:k * 2 + 2, 0:8])
                     T.writes(V_shared[0:2, 0:8])
-                    T.ppl_copy(V[k * 2, 0], V_shared)
+                    T.copy(V[k * 2, 0], V_shared)
                 with T.block("output_gemm"):
                     T.reads(acc_s_cast[0:2, 0:2], V_shared[0:2, 0:8], acc_o[0:2, 0:8])
                     T.writes(acc_o[0:2, 0:8])
-                    T.ppl_gemm(acc_s_cast, V_shared, acc_o)
+                    T.gemm(acc_s_cast, V_shared, acc_o)
 
-            T.ppl_copy(acc_o, O)
+            T.copy(acc_o, O)
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_attention_fp32_window_", suffix=".txt")
     os.close(fd)
@@ -625,15 +632,15 @@ def test_tpu_reduction_phase_model_certificate():
             A_powsum = T.alloc_shared((32, 1), "float32")
             A_temp = T.alloc_shared((32, 1), "float32")
 
-            T.ppl_fill(A_powsum, T.float32(0))
+            T.fill(A_powsum, T.float32(0))
             for k in T.Pipelined(2, num_stages=2):
-                T.ppl_copy(A[0, k * 32], A_shared)
-                T.ppl_copy(A_shared, A_shared_fp32)
-                T.ppl_mul(A_pow2, A_shared_fp32, A_shared_fp32)
-                T.ppl_reduce_sum(A_pow2, A_temp, dim=1)
-                T.ppl_add(A_powsum, A_powsum, A_temp)
+                T.copy(A[0, k * 32], A_shared)
+                T.copy(A_shared, A_shared_fp32)
+                T.mul(A_pow2, A_shared_fp32, A_shared_fp32)
+                T.reduce_sum(A_pow2, A_temp, dim=1)
+                T.add(A_powsum, A_powsum, A_temp)
 
-            T.ppl_copy(A_powsum, B)
+            T.copy(A_powsum, B)
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_reduction_phase_", suffix=".txt")
     os.close(fd)
@@ -703,27 +710,27 @@ def test_tpu_reduction_outer_alloc_buffer_version_lowering():
             A_powsum = T.alloc_shared((32, 1), "float32")
             A_temp = T.alloc_shared((32, 1), "float32")
 
-            T.ppl_fill(A_powsum, T.float32(0.0))
+            T.fill(A_powsum, T.float32(0.0))
             num_k_step = T.ceildiv(512, 32)
 
             for k in T.Pipelined(num_k_step, num_stages=2):
-                T.ppl_copy(A[bx * 32, k * 32], A_shared)
-                T.ppl_copy(A_shared, A_shared_fp32)
-                T.ppl_mul(A_pow2, A_shared_fp32, A_shared_fp32)
-                T.ppl_reduce_sum(A_pow2, A_temp, dim=1)
-                T.ppl_add(A_powsum, A_powsum, A_temp)
+                T.copy(A[bx * 32, k * 32], A_shared)
+                T.copy(A_shared, A_shared_fp32)
+                T.mul(A_pow2, A_shared_fp32, A_shared_fp32)
+                T.reduce_sum(A_pow2, A_temp, dim=1)
+                T.add(A_powsum, A_powsum, A_temp)
 
-            T.ppl_mul_C(A_powsum, A_powsum, reciprocal_N)
-            T.ppl_add_C(A_powsum, A_powsum, T.float32(1e-12))
-            T.ppl_rsqrt(A_powsum, A_powsum)
+            T.mul_C(A_powsum, A_powsum, reciprocal_N)
+            T.add_C(A_powsum, A_powsum, T.float32(1e-12))
+            T.rsqrt(A_powsum, A_powsum)
 
             for k in T.Pipelined(num_k_step, num_stages=0):
                 block_k_idx = num_k_step - 1 - k
-                T.ppl_copy(A[bx * 32, block_k_idx * 32], A_shared)
-                T.ppl_copy(A_shared, A_shared_fp32)
-                T.ppl_mul(A_shared_fp32, A_shared_fp32, A_powsum)
-                T.ppl_copy(A_shared_fp32, A_shared)
-                T.ppl_copy(A_shared, B[bx * 32, block_k_idx * 32])
+                T.copy(A[bx * 32, block_k_idx * 32], A_shared)
+                T.copy(A_shared, A_shared_fp32)
+                T.mul(A_shared_fp32, A_shared_fp32, A_powsum)
+                T.copy(A_shared_fp32, A_shared)
+                T.copy(A_shared, B[bx * 32, block_k_idx * 32])
 
     fd, path = tempfile.mkstemp(prefix="tl_tpu_reduction_outer_alloc_", suffix=".txt")
     os.close(fd)

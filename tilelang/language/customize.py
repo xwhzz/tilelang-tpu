@@ -2,11 +2,23 @@
 # Licensed under the MIT License.
 """The language interface for tl programs."""
 
-import tilelang.language as T
 from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, BufferLoad
 from typing import List, Union
-from .copy import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
+import builtins
+
+import tilelang.language as T
+from .copy import (
+    copy as _tl_copy,
+    buffer_to_tile_region,
+    buffer_region_to_tile_region,
+    buffer_load_to_tile_region,
+)
+from .gemm import gemm as _tl_gemm
+from .tir.ir import exp as _tir_exp
+from .tir.ir import rsqrt as _tir_rsqrt
+from .tir.ir import sigmoid as _tir_sigmoid
+from tvm.script.ir_builder.tir.ir import max as _tir_max
 
 
 def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
@@ -98,7 +110,17 @@ def view(src: Buffer,
     return T.Buffer(shape, dtype, src.data)
 
 
-def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
+def gemm(
+    A,
+    B,
+    C,
+    transpose_A=False,
+    transpose_B=False,
+    policy=None,
+    clear_accum=False,
+    k_pack=1,
+    wg_wait=0,
+):
     """Launch a TPU GEMM on local/shared tiles.
 
     Args:
@@ -113,15 +135,27 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
         PrimExpr: Handle to the emitted GEMM extern call.
 
     Example:
-        `T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True)`
+        `T.gemm(Q_shared, K_shared, acc_s, transpose_B=True)`
 
     Notes:
         `K` is inferred from `A` and `B`, and must match.
         In current TPU usage, `C` is typically initialized first, then reused
-        as the accumulation tile across one or more `ppl_gemm` calls.
+        as the accumulation tile across one or more `T.gemm` calls.
         `transpose_A` is not recommended in the current TPU path; prefer using
         `transpose_B=True` when a transpose form is needed.
     """
+    if policy is not None or clear_accum or k_pack != 1 or wg_wait != 0:
+        kwargs = {
+            "transpose_A": transpose_A,
+            "transpose_B": transpose_B,
+            "clear_accum": clear_accum,
+            "k_pack": k_pack,
+            "wg_wait": wg_wait,
+        }
+        if policy is not None:
+            kwargs["policy"] = policy
+        return _tl_gemm(A, B, C, **kwargs)
+
     def _extent(data):
         if isinstance(data, Buffer):
             return list(data.shape)
@@ -129,11 +163,11 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
             return [x.extent for x in data.region]
         if isinstance(data, BufferLoad):
             return [getattr(index, "lanes", 1) for index in data.indices]
-        raise TypeError(f"Unsupported ppl_gemm operand type: {type(data)}")
+        raise TypeError(f"Unsupported T.gemm operand type: {type(data)}")
 
     def _matrix_shape(data):
         shape = _extent(data)
-        assert len(shape) in (2, 3), f"ppl_gemm expects rank-2 or rank-3 tiles, got {shape}"
+        assert len(shape) in (2, 3), f"T.gemm expects rank-2 or rank-3 tiles, got {shape}"
         return shape[-2:]
 
     def _to_region(data, access_type):
@@ -147,7 +181,7 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
     B_extent = _extent(B)
     C_extent = _extent(C)
     assert len(A_extent) == len(B_extent) == len(
-        C_extent), "ppl_gemm expects A/B/C to have the same rank"
+        C_extent), "T.gemm expects A/B/C to have the same rank"
     for A_dim, B_dim, C_dim in zip(A_extent[:-2], B_extent[:-2], C_extent[:-2]):
         ir.assert_structural_equal(A_dim, B_dim)
         ir.assert_structural_equal(A_dim, C_dim)
@@ -177,9 +211,10 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
     )
 
 
-def ppl_copy(
+def copy(
     src,
     dst,
+    coalesced_width=None,
 ):
     """Copy a tile/region between global and local memory, with optional cast.
 
@@ -191,8 +226,8 @@ def ppl_copy(
         PrimExpr: Handle to the emitted copy extern call.
 
     Example:
-        `T.ppl_copy(X[by * block_M, 0], X_shared)`
-        `T.ppl_copy(A_shared_fp32, A_shared)`
+        `T.copy(X[by * block_M, 0], X_shared)`
+        `T.copy(A_shared_fp32, A_shared)`
 
     Notes:
         This op is commonly used for global-to-shared loads, shared-to-global
@@ -202,6 +237,9 @@ def ppl_copy(
         The most common TPU usage is copying 2D tiles or simple row/column
         slices.
     """
+
+    if coalesced_width is not None:
+        return _tl_copy(src, dst, coalesced_width=coalesced_width)
 
     def _is_one(value):
         return isinstance(value, int) and value == 1 or (
@@ -230,7 +268,7 @@ def ppl_copy(
 
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    rank = max(len(src_extent), len(dst_extent))
+    rank = builtins.max(len(src_extent), len(dst_extent))
     src_extent = [1] * (rank - len(src_extent)) + src_extent
     dst_extent = [1] * (rank - len(dst_extent)) + dst_extent
     extent = [
@@ -251,7 +289,7 @@ def ppl_copy(
     return T.call_extern("handle", "ppl.copy", src, dst)
 
 
-def ppl_fill(buffer, value):
+def fill(buffer, value):
     """Fill a local/shared tile with a scalar constant.
 
     Args:
@@ -262,8 +300,8 @@ def ppl_fill(buffer, value):
         PrimExpr: Handle to the emitted fill extern call.
 
     Example:
-        `T.ppl_fill(C_shared, T.float32(0))`
-        `T.ppl_fill(scores_max, -T.infinity(accum_dtype))`
+        `T.fill(C_shared, T.float32(0))`
+        `T.fill(scores_max, -T.infinity(accum_dtype))`
 
     Notes:
         This is typically used to initialize accumulation buffers, masks,
@@ -275,11 +313,11 @@ def ppl_fill(buffer, value):
     return T.call_extern("handle", "ppl.fill", buffer, value)
 
 
-def ppl_clear(buffer):
-    return T.ppl_fill(buffer, T.float32(0))
+def clear(buffer):
+    return fill(buffer, T.float32(0))
 
 
-def ppl_subtract(out, inp1, inp2):
+def subtract(out, inp1, inp2):
     """Compute elementwise subtraction `out = inp1 - inp2`.
 
     Args:
@@ -291,7 +329,7 @@ def ppl_subtract(out, inp1, inp2):
         PrimExpr: Handle to the emitted subtraction extern call.
 
     Example:
-        `T.ppl_subtract(scores_scale, scores_max_prev, scores_max)`
+        `T.subtract(scores_scale, scores_max_prev, scores_max)`
 
     Notes:
         The usual usage is that all tiles have the same shape.
@@ -304,7 +342,7 @@ def ppl_subtract(out, inp1, inp2):
     return T.call_extern("handle", "ppl.sub", outptr, inpptr1, inpptr2)
 
 
-def ppl_mul_C(out, inp1, value):
+def mul_C(out, inp1, value):
     """Compute elementwise scalar multiply `out = inp1 * value`.
 
     Args:
@@ -316,8 +354,8 @@ def ppl_mul_C(out, inp1, value):
         PrimExpr: Handle to the emitted multiply-by-constant extern call.
 
     Example:
-        `T.ppl_mul_C(scores_scale, scores_scale, scale)`
-        `T.ppl_mul_C(x_neg, in_x, T.float32(-1.0))`
+        `T.mul_C(scores_scale, scores_scale, scale)`
+        `T.mul_C(x_neg, in_x, T.float32(-1.0))`
 
     Notes:
         This is commonly used for scaling, sign flip, and normalization-style
@@ -328,7 +366,7 @@ def ppl_mul_C(out, inp1, value):
     return T.call_extern("handle", "ppl.mul_C", outptr, inpptr1, value)
 
 
-def ppl_mul(out, inp1, inp2):
+def mul(out, inp1, inp2):
     """Compute elementwise multiplication `out = inp1 * inp2`.
 
     Args:
@@ -340,8 +378,8 @@ def ppl_mul(out, inp1, inp2):
         PrimExpr: Handle to the emitted multiply extern call.
 
     Example:
-        `T.ppl_mul(A_pow2, A_shared, A_shared)`
-        `T.ppl_mul(out, right, x_neg_exp_1_div)`
+        `T.mul(A_pow2, A_shared, A_shared)`
+        `T.mul(out, right, x_neg_exp_1_div)`
 
     Notes:
         The usual usage is that all tiles have the same shape.
@@ -354,7 +392,7 @@ def ppl_mul(out, inp1, inp2):
     return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
 
-def ppl_max(out, inp1, inp2):
+def _max_tile(out, inp1, inp2):
     """Compute elementwise maximum `out = max(inp1, inp2)`.
 
     Args:
@@ -366,7 +404,7 @@ def ppl_max(out, inp1, inp2):
         PrimExpr: Handle to the emitted max extern call.
 
     Example:
-        `T.ppl_max(scores_max, scores_max_prev, block_max)`
+        `T.max(scores_max, scores_max_prev, block_max)`
 
     Notes:
         The usual usage is that all tiles have the same shape.
@@ -378,13 +416,12 @@ def ppl_max(out, inp1, inp2):
 
 
 @T.macro
-def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
-    """Compute `exp(out)` in place (loads coeff+table each call).
-
-    Despite the name `ppl_exp2`, this op computes natural exponential
-    `exp(x)`, not `2^x`. Use `ppl_exp_load_coeff` + `ppl_exp_compute`
-    only when the load/compute placement must be controlled explicitly.
-    """
+def _exp_fp32(out):
+    """Compute `exp(out)` in place and hide BM1690 work buffers."""
+    work0 = T.alloc_shared(out.shape, "float32")
+    work1 = T.alloc_shared(out.shape, "float32")
+    coeff = T.alloc_shared([64, 32], "float32")
+    table = T.alloc_shared([64, 192], "float32")
     buffer = out.access_ptr("rw")
     work0ptr = work0.access_ptr("rw")
     work1ptr = work1.access_ptr("rw")
@@ -394,11 +431,28 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
 
 
 @T.macro
-def ppl_exp_load_coeff(coeff, table):
+def _exp_cast(out):
+    tmp = T.alloc_shared(out.shape, "float32")
+    copy(out, tmp)
+    _exp_fp32(tmp)
+    copy(tmp, out)
+
+
+def exp(out):
+    """Compute tile-wise natural exponential, or scalar TIR exp for scalars."""
+    if isinstance(out, Buffer):
+        if str(out.dtype) == "float32":
+            return _exp_fp32(out)
+        return _exp_cast(out)
+    return _tir_exp(out)
+
+
+@T.macro
+def _exp_load_coeff(coeff, table):
     """Load exp coeff+table into SRAM for the following exp compute.
 
     On BM1690, `tpu_bdc_fp32_exp` uses the coeff/table buffers as scratch.
-    Reload them immediately before each `ppl_exp_compute`; hoisting this load
+    Reload them immediately before each `_exp_compute`; hoisting this load
     across an exp compute can corrupt later exp results.
 
     Args:
@@ -411,8 +465,8 @@ def ppl_exp_load_coeff(coeff, table):
 
 
 @T.macro
-def ppl_exp_compute(out, work0, work1, coeff, table):
-    """Compute `exp(out)` in place after `ppl_exp_load_coeff`.
+def _exp_compute(out, work0, work1, coeff, table):
+    """Compute `exp(out)` in place after `_exp_load_coeff`.
 
     The coeff/table buffers should be reloaded immediately before this call on
     BM1690 because the backend exp routine may modify them.
@@ -427,7 +481,11 @@ def ppl_exp_compute(out, work0, work1, coeff, table):
 
 
 @T.macro
-def ppl_sigmoid(out, inp, work0, work1, coeff, table):  # only support FP32
+def _sigmoid_fp32(out, inp):
+    work0 = T.alloc_shared(inp.shape, "float32")
+    work1 = T.alloc_shared(inp.shape, "float32")
+    coeff = T.alloc_shared([64, 32], "float32")
+    table = T.alloc_shared([64, 192], "float32")
     outptr = out.access_ptr("rw")
     inpptr = inp.access_ptr("rw")
     work0ptr = work0.access_ptr("rw")
@@ -436,32 +494,51 @@ def ppl_sigmoid(out, inp, work0, work1, coeff, table):  # only support FP32
     tableptr = table.access_ptr("rw")
     T.call_extern("handle", "ppl.sigmoid", outptr, inpptr, work0ptr, work1ptr, coeffptr, tableptr)
 
-def ppl_gather(output, param, index, param_h):
+
+@T.macro
+def _sigmoid_cast(out, inp):
+    inp_fp32 = T.alloc_shared(inp.shape, "float32")
+    out_fp32 = T.alloc_shared(out.shape, "float32")
+    copy(inp, inp_fp32)
+    _sigmoid_fp32(out_fp32, inp_fp32)
+    copy(out_fp32, out)
+
+
+def sigmoid(out, inp=None):
+    """Compute tile-wise sigmoid, or scalar TIR sigmoid for scalars."""
+    if inp is None:
+        return _tir_sigmoid(out)
+    if str(out.dtype) == "float32" and str(inp.dtype) == "float32":
+        return _sigmoid_fp32(out, inp)
+    return _sigmoid_cast(out, inp)
+
+
+@T.macro
+def _silu_tile(out, inp):
+    sigmoid_value = T.alloc_shared(inp.shape, inp.dtype)
+    sigmoid(sigmoid_value, inp)
+    mul(out, inp, sigmoid_value)
+
+
+def silu(out, inp):
+    return _silu_tile(out, inp)
+
+
+def gather(output, param, index, param_h):
     outptr = output.access_ptr("w")
     paramptr = param.access_ptr("r")
     indexptr = index.access_ptr("r")
     return T.call_extern("handle", "ppl.gather", outptr, paramptr, indexptr, param_h)
 
-def ppl_topk(dst_data, dst_idx, src, K, descended, length):
+
+def topk(dst_data, dst_idx, src, K, descended, length):
     dst_data_ptr = dst_data.access_ptr("w")
     dst_idx_ptr = dst_idx.access_ptr("w")
     srcptr = src.access_ptr("r")
     return T.call_extern("handle", "ppl.topk", dst_data_ptr, dst_idx_ptr, srcptr, K, descended, length)
 
-# def ppl_exp2(out, block_M, block_N, dtype): # only support FP32
-#     buffer = out.access_ptr("rw")
-#     work0 = T.alloc_shared([block_M, block_N], dtype)
-#     work1 = T.alloc_shared([block_M, block_N], dtype)
-#     coeff = T.alloc_shared([64, 32], dtype) # npu number is 64
-#     table = T.alloc_shared([64, 192], dtype) # npu number is 64
-#     work0ptr = work0.access_ptr("rw")
-#     work1ptr = work1.access_ptr("rw")
-#     coeffptr = coeff.access_ptr("rw")
-#     tableptr = table.access_ptr("rw")
-#     T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
 
-
-def ppl_rsqrt(out, inp):
+def _rsqrt_tile(out, inp):
     """Compute reciprocal square root `out = rsqrt(inp)`.
 
     Args:
@@ -472,19 +549,25 @@ def ppl_rsqrt(out, inp):
         PrimExpr: Handle to the emitted rsqrt extern call.
 
     Example:
-        `T.ppl_rsqrt(A_powsum, A_powsum)`
+        `T.rsqrt(A_powsum, A_powsum)`
 
     Notes:
         The current usage requires both `out` and `inp` to be FP32.
         For FP16/BF16 workflows, first copy into an FP32 temporary buffer,
-        apply `ppl_rsqrt`, then copy back if needed.
+        apply `T.rsqrt`, then copy back if needed.
     """
     inpptr = inp.access_ptr("r")
     outptr = out.access_ptr("w")
     return T.call_extern("handle", "ppl.rsqrt", outptr, inpptr)
 
 
-def ppl_add_C(out, inp1, value):
+def rsqrt(out, inp=None):
+    if inp is None:
+        return _tir_rsqrt(out)
+    return _rsqrt_tile(out, inp)
+
+
+def add_C(out, inp1, value):
     """Compute elementwise scalar add `out = inp1 + value`.
 
     Args:
@@ -496,7 +579,7 @@ def ppl_add_C(out, inp1, value):
         PrimExpr: Handle to the emitted add-by-constant extern call.
 
     Example:
-        `T.ppl_add_C(A_powsum, A_powsum, T.float32(1e-12))`
+        `T.add_C(A_powsum, A_powsum, T.float32(1e-12))`
 
     Notes:
         This is commonly used to add epsilon, bias, or other scalar offsets to
@@ -507,7 +590,7 @@ def ppl_add_C(out, inp1, value):
     return T.call_extern("handle", "ppl.add_C", outptr, inpptr1, value)
 
 
-def ppl_add(out, inp1, inp2):
+def add(out, inp1, inp2):
     """Compute elementwise addition `out = inp1 + inp2`.
 
     Args:
@@ -519,8 +602,8 @@ def ppl_add(out, inp1, inp2):
         PrimExpr: Handle to the emitted add extern call.
 
     Example:
-        `T.ppl_add(logsum, logsum, scores_sum)`
-        `T.ppl_add(x_neg_exp_1, x_neg_exp, ones)`
+        `T.add(logsum, logsum, scores_sum)`
+        `T.add(x_neg_exp_1, x_neg_exp, ones)`
 
     Notes:
         The usual usage is that all tiles have the same shape.
@@ -533,7 +616,13 @@ def ppl_add(out, inp1, inp2):
     return T.call_extern("handle", "ppl.add", outptr, inpptr1, inpptr2)
 
 
-def ppl_div(out, inp1, inp2):
+def max(a, b, c=None):  # pylint: disable=redefined-builtin
+    if c is None:
+        return _tir_max(a, b)
+    return _max_tile(a, b, c)
+
+
+def div(out, inp1, inp2):
     """Compute elementwise division `out = inp1 / inp2`.
 
     Args:
@@ -545,8 +634,8 @@ def ppl_div(out, inp1, inp2):
         PrimExpr: Handle to the emitted division extern call.
 
     Example:
-        `T.ppl_div(acc_o, acc_o, logsum)`
-        `T.ppl_div(x_neg_exp_1_div, x, x_neg_exp_1)`
+        `T.div(acc_o, acc_o, logsum)`
+        `T.div(x_neg_exp_1_div, x, x_neg_exp_1)`
 
     Notes:
         The usual usage is that all tiles have the same shape.
@@ -560,10 +649,10 @@ def ppl_div(out, inp1, inp2):
 
 
 @T.macro
-def ppl_reduce_sum_safe(inp, out, dim):
-    """Internal macro backing `ppl_reduce_sum`.
+def _reduce_sum_safe(inp, out, dim):
+    """Internal macro backing `reduce_sum`.
 
-    Prefer calling `ppl_reduce_sum(...)` directly in user kernels.
+    Prefer calling `reduce_sum(...)` directly in user kernels.
     """
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
@@ -580,7 +669,7 @@ def ppl_reduce_sum_safe(inp, out, dim):
 
 
 @T.macro
-def ppl_reduce_sum_safe_3d(inp, out, dim):
+def _reduce_sum_safe_3d(inp, out, dim):
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
     with T.block("reduce_sum"):
@@ -594,7 +683,7 @@ def ppl_reduce_sum_safe_3d(inp, out, dim):
         T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
-def ppl_reduce_sum(inp, out, dim):
+def reduce_sum(inp, out, dim):
     """Reduce a rank-2/rank-3 tile along its last dimension with summation.
 
     Args:
@@ -606,8 +695,8 @@ def ppl_reduce_sum(inp, out, dim):
         PrimExpr: Handle to the emitted reduction macro call.
 
     Example:
-        `T.ppl_reduce_sum(acc_s, scores_sum, dim=1)`
-        `T.ppl_reduce_sum(X_shared, Y_shared, dim=1)`
+        `T.reduce_sum(acc_s, scores_sum, dim=1)`
+        `T.reduce_sum(X_shared, Y_shared, dim=1)`
 
     Notes:
         This op is intended for 2D or 3D local tiles and currently only
@@ -616,16 +705,16 @@ def ppl_reduce_sum(inp, out, dim):
     rank = len(inp.shape)
     assert dim == rank - 1, "Only reduction along the last dim is supported"
     if rank == 2:
-        return ppl_reduce_sum_safe(inp, out, dim)
+        return _reduce_sum_safe(inp, out, dim)
     assert rank == 3, "Only rank-2 and rank-3 tensors are supported for reduction"
-    return ppl_reduce_sum_safe_3d(inp, out, dim)
+    return _reduce_sum_safe_3d(inp, out, dim)
 
 
 @T.macro
-def ppl_reduce_max_safe(inp, out, dim, clear=True):
-    """Internal macro backing `ppl_reduce_max`.
+def _reduce_max_safe(inp, out, dim, clear=True):
+    """Internal macro backing `reduce_max`.
 
-    Prefer calling `ppl_reduce_max(...)` directly in user kernels.
+    Prefer calling `reduce_max(...)` directly in user kernels.
     """
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
@@ -649,7 +738,7 @@ def ppl_reduce_max_safe(inp, out, dim, clear=True):
 
 
 @T.macro
-def ppl_reduce_max_safe_3d(inp, out, dim, clear=True):
+def _reduce_max_safe_3d(inp, out, dim, clear=True):
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
     if clear:
@@ -665,7 +754,7 @@ def ppl_reduce_max_safe_3d(inp, out, dim, clear=True):
         T.call_extern("handle", "ppl.reduce_max", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
-def ppl_reduce_max(inp, out, dim, clear=True):
+def reduce_max(inp, out, dim, clear=True):
     """Reduce a rank-2/rank-3 tile along its last dimension with max.
 
     Args:
@@ -679,8 +768,8 @@ def ppl_reduce_max(inp, out, dim, clear=True):
         PrimExpr: Handle to the emitted reduction macro call.
 
     Example:
-        `T.ppl_reduce_max(acc_s, scores_max, dim=1, clear=False)`
-        `T.ppl_reduce_max(X_shared, Y_shared, dim=1, clear=True)`
+        `T.reduce_max(acc_s, scores_max, dim=1, clear=False)`
+        `T.reduce_max(X_shared, Y_shared, dim=1, clear=True)`
 
     Notes:
         This op is intended for 2D or 3D local tiles and currently only
@@ -692,12 +781,12 @@ def ppl_reduce_max(inp, out, dim, clear=True):
     rank = len(inp.shape)
     assert dim == rank - 1, "Only reduction along the last dim is supported"
     if rank == 2:
-        return ppl_reduce_max_safe(inp, out, dim, clear)
+        return _reduce_max_safe(inp, out, dim, clear)
     assert rank == 3, "Only rank-2 and rank-3 tensors are supported for reduction"
-    return ppl_reduce_max_safe_3d(inp, out, dim, clear)
+    return _reduce_max_safe_3d(inp, out, dim, clear)
 
 
-def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
+def rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
     """Assemble interleaved RoPE output from precomputed even/odd terms.
 
     Args:
@@ -711,7 +800,7 @@ def ppl_rope_add(out, even_inp1, even_inp2, odd_inp1, odd_inp2):
         PrimExpr: Handle to the emitted RoPE extern call.
 
     Example:
-        `T.ppl_rope_add(out, x_cos, x_neg_sin, x_cos, x_sin)`
+        `T.rope_add(out, x_cos, x_neg_sin, x_cos, x_sin)`
 
     Notes:
         This helper is intended for the common RoPE pattern where the caller

@@ -6,7 +6,7 @@ The project provides end-to-end TPU support centered on BM1690, including `targe
 ## Highlights
 
 - TileLang frontend with TPU target support
-- TPU-specific DSL intrinsics such as `ppl_copy`, `ppl_gemm`, `ppl_reduce_sum`, `ppl_reduce_max`, `ppl_rsqrt`, and `ppl_rope_add`
+- TPU-specific DSL intrinsics such as `T.copy`, `T.gemm`, `T.reduce_sum`, `T.reduce_max`, `T.exp`, `T.rsqrt`, and `T.rope_add`
 - End-to-end JIT flow from Python kernel definition to generated TPU host/device artifacts
 - BM1690-oriented execution path with both PCIe execution and `cmodel` simulation modes
 - Operator coverage aligned with kernels commonly used by Llama and DeepSeek workloads
@@ -91,15 +91,16 @@ kernel = tilelang.compile(
 
 Inside TPU kernels, the common building blocks are exposed as TileLang DSL intrinsics in [`tilelang/language/customize.py`](./tilelang/language/customize.py), including:
 
-- `T.ppl_copy`
-- `T.ppl_fill`
-- `T.ppl_gemm`
-- `T.ppl_reduce_sum`
-- `T.ppl_reduce_max`
-- `T.ppl_add`, `T.ppl_subtract`, `T.ppl_mul`, `T.ppl_div`
-- `T.ppl_add_C`, `T.ppl_mul_C`
-- `T.ppl_rsqrt`
-- `T.ppl_rope_add`
+- `T.copy`
+- `T.fill`
+- `T.gemm`
+- `T.reduce_sum`
+- `T.reduce_max`
+- `T.add`, `T.subtract`, `T.mul`, `T.div`
+- `T.add_C`, `T.mul_C`
+- `T.exp`, `T.sigmoid`, `T.silu`
+- `T.rsqrt`
+- `T.rope_add`
 
 ## Examples
 

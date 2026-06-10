@@ -58,27 +58,26 @@ from .customize import (
     clamp,  # noqa: F401
     reshape,  # noqa: F401
     view,  # noqa: F401
-    ppl_gemm,  # noqa: F401
-    ppl_copy,  # noqa: F401
-    ppl_fill,  # noqa: F401
-    ppl_clear,  # noqa: F401
-    ppl_add,  # noqa: F401
-    ppl_div,  # noqa: F401
-    ppl_exp2,  # noqa: F401
-    ppl_exp_load_coeff,  # noqa: F401
-    ppl_exp_compute,  # noqa: F401
-    ppl_mul,  # noqa: F401 
-    ppl_mul_C,  # noqa: F401
-    ppl_max,  # noqa: F401
-    ppl_reduce_max,  # noqa: F401
-    ppl_reduce_sum,  # noqa: F401
-    ppl_subtract,  # noqa: F401
-    ppl_rsqrt,  # noqa: F401
-    ppl_add_C,  # noqa: F401
-    ppl_rope_add,  # noqa: F401
-    ppl_sigmoid,  # noqa: F401
-    ppl_gather,  # noqa: F401
-    ppl_topk,  # noqa: F401
+    gemm,  # noqa: F401
+    copy,  # noqa: F401
+    fill,  # noqa: F401
+    clear,  # noqa: F401
+    add,  # noqa: F401
+    div,  # noqa: F401
+    exp,  # noqa: F401
+    mul,  # noqa: F401
+    mul_C,  # noqa: F401
+    max,  # noqa: F401
+    reduce_max,  # noqa: F401
+    reduce_sum,  # noqa: F401
+    subtract,  # noqa: F401
+    rsqrt,  # noqa: F401
+    add_C,  # noqa: F401
+    rope_add,  # noqa: F401
+    sigmoid,  # noqa: F401
+    silu,  # noqa: F401
+    gather,  # noqa: F401
+    topk,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
 

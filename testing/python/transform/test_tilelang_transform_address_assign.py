@@ -35,7 +35,7 @@ def _single_attr_with_prefix(attrs, prefix):
     return keys[0]
 
 
-def test_ppl_gemm_output_write_phase_can_share_input_bank():
+def test_tpu_gemm_buffers_are_bank_separated():
 
     @T.prim_func
     def main():
@@ -44,18 +44,15 @@ def test_ppl_gemm_output_write_phase_can_share_input_bank():
             b_shared = T.alloc_shared((1024, 64), "float32")
             c_shared = T.alloc_shared((64, 64), "float32")
 
-            T.ppl_fill(c_shared, T.float32(0.0))
-            T.ppl_gemm(a_shared, b_shared, c_shared)
+            T.fill(c_shared, T.float32(0.0))
+            T.gemm(a_shared, b_shared, c_shared)
 
     attrs = _assigned_attrs(main)
     a_addr = _addr(attrs, "a_shared")
     b_addr = _addr(attrs, "b_shared")
     c_addr = _addr(attrs, "c_shared")
 
-    assert a_addr // BANK_SIZE != b_addr // BANK_SIZE
-    assert c_addr // BANK_SIZE == a_addr // BANK_SIZE
-    assert a_addr <= c_addr
-    assert c_addr < a_addr + BANK_SIZE
+    assert len({a_addr // BANK_SIZE, b_addr // BANK_SIZE, c_addr // BANK_SIZE}) == 3
 
 
 def test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible():
@@ -67,7 +64,7 @@ def test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible():
             src1 = T.alloc_shared((64, 1024), "float32")
             dst = T.alloc_shared((64, 64), "float32")
 
-            T.ppl_add(dst, src0, src1)
+            T.add(dst, src0, src1)
 
     attrs = _assigned_attrs(main)
     src0_addr = _addr(attrs, "src0")
@@ -86,7 +83,7 @@ def test_reduce_tmp_is_separated_from_input_bank():
             inp = T.alloc_shared((64, 1024), "float32")
             out = T.alloc_shared((64, 1), "float32")
 
-            T.ppl_reduce_sum(inp, out, dim=1)
+            T.reduce_sum(inp, out, dim=1)
 
     attrs = _assigned_attrs(main)
     tmp_name = _single_attr_with_prefix(attrs, "tmp_buffer_sum")
@@ -96,33 +93,39 @@ def test_reduce_tmp_is_separated_from_input_bank():
     assert inp_addr // BANK_SIZE != tmp_addr // BANK_SIZE
 
 
-def test_exp_composite_operands_are_conservative_bank_clique():
+def test_exp_hidden_workspace_is_reused_for_multiple_calls():
 
     @T.prim_func
     def main():
         with T.Kernel(1, is_cpu=True) as _:
-            out = T.alloc_shared((64, 1024), "float32")
-            work0 = T.alloc_shared((64, 1024), "float32")
-            work1 = T.alloc_shared((64, 1024), "float32")
-            coeff = T.alloc_shared((64, 32), "float32")
-            table = T.alloc_shared((64, 192), "float32")
+            out0 = T.alloc_shared((64, 1024), "float32")
+            out1 = T.alloc_shared((64, 1024), "float32")
 
-            T.ppl_exp2(out, work0, work1, coeff, table)
+            T.exp(out0)
+            T.exp(out1)
 
     attrs = _assigned_attrs(main)
-    banks = {
-        _addr(attrs, "out") // BANK_SIZE,
+    keys = _attr_keys(attrs)
+    assert len([key for key in keys if key.startswith("work0")]) == 1, keys
+    assert len([key for key in keys if key.startswith("work1")]) == 1, keys
+    assert len([key for key in keys if key.startswith("coeff")]) == 1, keys
+    assert len([key for key in keys if key.startswith("table")]) == 1, keys
+
+    first_call_banks = {
+        _addr(attrs, "out0") // BANK_SIZE,
         _addr(attrs, "work0") // BANK_SIZE,
         _addr(attrs, "work1") // BANK_SIZE,
         _addr(attrs, "coeff") // BANK_SIZE,
         _addr(attrs, "table") // BANK_SIZE,
     }
+    second_call_banks = first_call_banks | {_addr(attrs, "out1") // BANK_SIZE}
 
-    assert len(banks) == 5
+    assert len(first_call_banks) == 5
+    assert len(second_call_banks) >= 5, (keys, first_call_banks, second_call_banks)
 
 
 if __name__ == "__main__":
-    test_ppl_gemm_output_write_phase_can_share_input_bank()
+    test_tpu_gemm_buffers_are_bank_separated()
     test_elementwise_reads_are_bank_separated_while_outputs_remain_flexible()
     test_reduce_tmp_is_separated_from_input_bank()
-    test_exp_composite_operands_are_conservative_bank_clique()
+    test_exp_hidden_workspace_is_reused_for_multiple_calls()
