@@ -17,7 +17,7 @@ def elementwise_add(
 ):
 
     @T.prim_func
-    def main(
+    def main_kernel_inner(
             A: T.Tensor((M, N), in_dtype),
             B: T.Tensor((M, N), in_dtype),
             C: T.Tensor((M, N), out_dtype),
@@ -26,13 +26,13 @@ def elementwise_add(
             A_shared = T.alloc_shared((block_M, block_N), in_dtype)
             B_shared = T.alloc_shared((block_M, block_N), in_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
-            T.ppl_copy(A[by * block_M, bx * block_N], A_shared)
-            T.ppl_copy(B[by * block_M, bx * block_N], B_shared)
-            T.ppl_add(C_shared, A_shared, B_shared)
+            T.copy(A[by * block_M, bx * block_N], A_shared)
+            T.copy(B[by * block_M, bx * block_N], B_shared)
+            T.add(C_shared, A_shared, B_shared)
 
-            T.ppl_copy(C_shared, C[by * block_M, bx * block_N])
+            T.copy(C_shared, C[by * block_M, bx * block_N])
 
-    return main
+    return main_kernel_inner
 
 
 def ref_add(a, b):

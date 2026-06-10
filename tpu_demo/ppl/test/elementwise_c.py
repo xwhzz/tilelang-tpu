@@ -8,16 +8,16 @@ import tilelang.language as T
 def elementwise_c(M, N, blk_m, blk_n, dtype):
 
     @T.prim_func
-    def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
+    def main_kernel_inner(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
 
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, blk_n), is_cpu=True) as (bx, by):
             A_shared = T.alloc_shared((blk_m, blk_n), dtype)
-            T.ppl_copy(A[bx * blk_m, by * blk_n], A_shared)
-            T.ppl_mul_C(A_shared, A_shared, T.float32(1 / 8192))
-            T.ppl_add_C(A_shared, A_shared, T.float32(1e-12))
-            T.ppl_copy(A_shared, B[bx * blk_m, by * blk_n])
+            T.copy(A[bx * blk_m, by * blk_n], A_shared)
+            T.mul_C(A_shared, A_shared, T.float32(1 / 8192))
+            T.add_C(A_shared, A_shared, T.float32(1e-12))
+            T.copy(A_shared, B[bx * blk_m, by * blk_n])
 
-    return main
+    return main_kernel_inner
 
 
 dtype = "float"

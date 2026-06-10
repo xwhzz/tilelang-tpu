@@ -9,17 +9,17 @@ import tilelang.language as T
 def matmul(M, N, block_M, block_N, stage, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
-    def main(
+    def main_kernel_inner(
             A: T.Tensor((M, N), dtype),
     ):
       with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
         A_shared = T.alloc_shared((block_M, block_N), accum_dtype)
 
-        T.ppl_fill(A_shared, T.float32(0))
+        T.fill(A_shared, T.float32(0))
 
         T.copy(A_shared, A[by * block_M, bx * block_N])
 
-    return main
+    return main_kernel_inner
 
 
 # func =  matmul(4096, 8192, 1024, 1024, 512, 128, 2)
