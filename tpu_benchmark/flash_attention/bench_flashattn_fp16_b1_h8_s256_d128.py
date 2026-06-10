@@ -3,9 +3,8 @@ FlashAttention FP16 B1H8S256D128 — tilelang vs PPL
 
 Optimization vs v1:
   1. Pre-scale Q by 1/sqrt(d) before the K-loop (matches PPL).
-  2. Reload exp coeff/table immediately before each exp compute;
-     tpu_bdc_fp32_exp treats these buffers as scratch on BM1690.
-  3. Single shared coeff+table buffer for both exp calls, reloaded before use.
+  2. Use T.exp so BM1690 exp work/coeff/table buffers stay hidden.
+  3. Keep Softmax frontend code free of backend scratch-buffer plumbing.
 """
 
 import math
@@ -18,9 +17,6 @@ sys.path.insert(0, BENCHMARK_ROOT)
 
 import tilelang
 import tilelang.language as T
-
-T.copy = T.ppl_copy
-
 BATCH, HEADS, SEQ_LEN, DIM = 1, 8, 256, 128
 BLOCK_M, BLOCK_N = 32, 32
 IS_CAUSAL = False
@@ -38,34 +34,32 @@ def tl_flashattn_fp16_v2(batch, heads, seq_len, dim, block_M, block_N,
     @T.macro
     def MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz):
         T.copy(K[bz, k * block_N:(k + 1) * block_N, by, :], K_shared)
-        T.ppl_fill(acc_s, T.float32(0))
-        T.ppl_gemm(Q_shared, K_shared, acc_s, transpose_B=True)
+        T.fill(acc_s, T.float32(0))
+        T.gemm(Q_shared, K_shared, acc_s, transpose_B=True)
 
     @T.macro
     def MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz):
         T.copy(V[bz, k * block_N:(k + 1) * block_N, by, :], V_shared)
-        T.ppl_gemm(acc_s_cast, V_shared, acc_o)
+        T.gemm(acc_s_cast, V_shared, acc_o)
 
     @T.macro
     def Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, block_max,
-                scores_scale, scores_sum, logsum, work0, work1, coeff, table):
+                scores_scale, scores_sum, logsum):
         T.copy(scores_max, scores_max_prev)
-        T.ppl_reduce_max(acc_s, block_max, dim=1)
-        T.ppl_max(scores_max, scores_max_prev, block_max)
-        T.ppl_subtract(scores_scale, scores_max_prev, scores_max)
-        T.ppl_exp_load_coeff(coeff, table)
-        T.ppl_exp_compute(scores_scale, work0, work1, coeff, table)
-        T.ppl_subtract(acc_s, acc_s, scores_max)
-        T.ppl_exp_load_coeff(coeff, table)
-        T.ppl_exp_compute(acc_s, work0, work1, coeff, table)
-        T.ppl_reduce_sum(acc_s, scores_sum, dim=1)
-        T.ppl_mul(logsum, logsum, scores_scale)
-        T.ppl_add(logsum, logsum, scores_sum)
+        T.reduce_max(acc_s, block_max, dim=1)
+        T.max(scores_max, scores_max_prev, block_max)
+        T.subtract(scores_scale, scores_max_prev, scores_max)
+        T.exp(scores_scale)
+        T.subtract(acc_s, acc_s, scores_max)
+        T.exp(acc_s)
+        T.reduce_sum(acc_s, scores_sum, dim=1)
+        T.mul(logsum, logsum, scores_scale)
+        T.add(logsum, logsum, scores_sum)
         T.copy(acc_s, acc_s_cast)
 
     @T.macro
     def Rescale(acc_o, scores_scale):
-        T.ppl_mul(acc_o, acc_o, scores_scale)
+        T.mul(acc_o, acc_o, scores_scale)
 
     @T.prim_func
     def main_kernel_inner(
@@ -88,16 +82,12 @@ def tl_flashattn_fp16_v2(batch, heads, seq_len, dim, block_M, block_N,
             scores_scale = T.alloc_shared([block_M, 1], accum_dtype)
             scores_sum = T.alloc_shared([block_M, 1], accum_dtype)
             logsum = T.alloc_shared([block_M, 1], accum_dtype)
-            work0 = T.alloc_shared([block_M, block_N], accum_dtype)
-            work1 = T.alloc_shared([block_M, block_N], accum_dtype)
-            coeff = T.alloc_shared([64, 32], accum_dtype)
-            table = T.alloc_shared([64, 192], accum_dtype)
 
             T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
-            T.ppl_mul_C(Q_shared, Q_shared, T.float32(scale))
-            T.ppl_fill(acc_o, T.float32(0))
-            T.ppl_fill(logsum, T.float32(0))
-            T.ppl_fill(scores_max, -T.infinity(accum_dtype))
+            T.mul_C(Q_shared, Q_shared, T.float32(scale))
+            T.fill(acc_o, T.float32(0))
+            T.fill(logsum, T.float32(0))
+            T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = (
                 T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
@@ -106,10 +96,10 @@ def tl_flashattn_fp16_v2(batch, heads, seq_len, dim, block_M, block_N,
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, block_max, scores_scale,
-                        scores_sum, logsum, work0, work1, coeff, table)
+                        scores_sum, logsum)
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
-            T.ppl_div(acc_o, acc_o, logsum)
+            T.div(acc_o, acc_o, logsum)
             T.copy(acc_o, O_shared)
             T.copy(O_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
 

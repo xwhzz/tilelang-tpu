@@ -59,7 +59,7 @@
 
 - kernel grid 为 `(seq_block, batch)`，head 维度放入本地 rank-3 tensor。
 - 本地张量布局为 `[heads, block, dim]` 和 `[heads, block_m, block_n]`。
-- 直接调用普通 `T.ppl_gemm` 处理 rank-3 local tile；codegen 在 C 层逐 head 发二维
+- 直接调用普通 `T.gemm` 处理 rank-3 local tile；codegen 在 C 层逐 head 发二维
   GEMM，reduce、exp、状态缩放和累加不再在外层按 head 重复。
 
 `H > 8` 或大 batch/head shape 使用 head blocking（按 head 分块）实现：

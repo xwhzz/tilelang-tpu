@@ -27,10 +27,10 @@ def tl_add(M, N, block_M, block_N, dtype="float32"):
             A_shared = T.alloc_shared((block_M, block_N), dtype)
             B_shared = T.alloc_shared((block_M, block_N), dtype)
             C_shared = T.alloc_shared((block_M, block_N), dtype)
-            T.ppl_copy(A[by * block_M, bx * block_N], A_shared)
-            T.ppl_copy(B[by * block_M, bx * block_N], B_shared)
-            T.ppl_add(C_shared, A_shared, B_shared)
-            T.ppl_copy(C_shared, C[by * block_M, bx * block_N])
+            T.copy(A[by * block_M, bx * block_N], A_shared)
+            T.copy(B[by * block_M, bx * block_N], B_shared)
+            T.add(C_shared, A_shared, B_shared)
+            T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main_kernel_inner
 

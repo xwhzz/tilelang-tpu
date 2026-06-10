@@ -31,25 +31,21 @@ def tl_swiglu(Block_w, Block_c, C, W, dtype="float32", accum_dtype="float32"):
             right = T.alloc_shared(block_shape, accum_dtype)
             x_neg_exp = T.alloc_shared(block_shape, accum_dtype)
             ones = T.alloc_shared(block_shape, accum_dtype)
-            T.ppl_fill(ones, T.float32(1.0))
+            T.fill(ones, T.float32(1.0))
             x_neg_exp_1 = T.alloc_shared(block_shape, accum_dtype)
             x_neg_exp_1_div = T.alloc_shared(block_shape, accum_dtype)
             out = T.alloc_shared(block_shape, accum_dtype)
 
-            T.ppl_copy(G_in[bx * Block_c, by * Block_w], x)
-            T.ppl_copy(G_right[bx * Block_c, by * Block_w], right)
-            T.ppl_mul_C(x_neg_exp, x, T.float32(-1.0))
+            T.copy(G_in[bx * Block_c, by * Block_w], x)
+            T.copy(G_right[bx * Block_c, by * Block_w], right)
+            T.mul_C(x_neg_exp, x, T.float32(-1.0))
 
-            work0 = T.alloc_shared([Block_c, Block_w], accum_dtype)
-            work1 = T.alloc_shared([Block_c, Block_w], accum_dtype)
-            coeff = T.alloc_shared([64, 32], accum_dtype)
-            table = T.alloc_shared([64, 192], accum_dtype)
-            T.ppl_exp2(x_neg_exp, work0, work1, coeff, table)
-            T.ppl_add(x_neg_exp_1, x_neg_exp, ones)
-            T.ppl_div(x_neg_exp_1_div, x, x_neg_exp_1)
-            T.ppl_mul(out, right, x_neg_exp_1_div)
+            T.exp(x_neg_exp)
+            T.add(x_neg_exp_1, x_neg_exp, ones)
+            T.div(x_neg_exp_1_div, x, x_neg_exp_1)
+            T.mul(out, right, x_neg_exp_1_div)
 
-            T.ppl_copy(out, G_out[bx * Block_c, by * Block_w])
+            T.copy(out, G_out[bx * Block_c, by * Block_w])
 
     return main_kernel_inner
 

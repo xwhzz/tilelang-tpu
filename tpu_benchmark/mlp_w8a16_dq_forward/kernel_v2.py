@@ -114,8 +114,6 @@ def mlp_w8a16_fused_kernel_v2(
             # --- SiLU: exp work buffers ---
             exp_work0 = T.alloc_shared((block_M, block_N), accum_dtype)
             exp_work1 = T.alloc_shared((block_M, block_N), accum_dtype)
-            exp_coeff = T.alloc_shared((64, 32), accum_dtype)
-            exp_table = T.alloc_shared((64, 192), accum_dtype)
 
             # --- Down accumulation buffer (reuses gate_accum after Phase 1) ---
             down_accum = T.alloc_shared((block_M, block_D), accum_dtype)
@@ -133,120 +131,120 @@ def mlp_w8a16_fused_kernel_v2(
             # Phase 1: gate+up+SiLU → Act buffer (computed ONCE).
             # ============================================================
             for n_tile in T.serial(N_tiles_full):
-                T.ppl_fill(gate_accum, T.float32(0))
-                T.ppl_fill(up_accum, T.float32(0))
+                T.fill(gate_accum, T.float32(0))
+                T.fill(up_accum, T.float32(0))
 
                 # K-dimension accumulation for gate and up
                 for k_tile in T.serial(K_tiles):
-                    T.ppl_copy(X[by * block_M, k_tile * block_K], A_shared)
+                    T.copy(X[by * block_M, k_tile * block_K], A_shared)
 
                     # Gate: gate_accum += A @ W_gate^T
-                    T.ppl_copy(W_gate[n_tile * block_N, k_tile * block_K], W_shared)
-                    T.ppl_gemm(A_shared, W_shared, C_temp, transpose_B=True)
-                    T.ppl_add(gate_accum, gate_accum, C_temp)
+                    T.copy(W_gate[n_tile * block_N, k_tile * block_K], W_shared)
+                    T.gemm(A_shared, W_shared, C_temp, transpose_B=True)
+                    T.add(gate_accum, gate_accum, C_temp)
 
                     # Up: up_accum += A @ W_up^T
-                    T.ppl_copy(W_up[n_tile * block_N, k_tile * block_K], W_shared)
-                    T.ppl_gemm(A_shared, W_shared, C_temp, transpose_B=True)
-                    T.ppl_add(up_accum, up_accum, C_temp)
+                    T.copy(W_up[n_tile * block_N, k_tile * block_K], W_shared)
+                    T.gemm(A_shared, W_shared, C_temp, transpose_B=True)
+                    T.add(up_accum, up_accum, C_temp)
 
                 # =============================================
                 # SiLU(gate_accum) * up_accum (on-NPU, local)
                 # =============================================
                 # Step 1: Backup gate → C_temp
-                T.ppl_copy(gate_accum, C_temp)
+                T.copy(gate_accum, C_temp)
                 # Step 2: exp_work0 = -gate
-                T.ppl_mul_C(exp_work0, gate_accum, T.float32(-1.0))
+                T.mul_C(exp_work0, gate_accum, T.float32(-1.0))
                 # Step 2b: Clamp -gate to 88.72 = ln(FLT_MAX) to prevent fp32 overflow
-                T.ppl_fill(exp_work1, T.float32(88.72))
-                T.ppl_mul_C(exp_work0, exp_work0, T.float32(-1.0))
-                T.ppl_mul_C(exp_work1, exp_work1, T.float32(-1.0))
-                T.ppl_max(exp_work0, exp_work0, exp_work1)
-                T.ppl_mul_C(exp_work0, exp_work0, T.float32(-1.0))
+                T.fill(exp_work1, T.float32(88.72))
+                T.mul_C(exp_work0, exp_work0, T.float32(-1.0))
+                T.mul_C(exp_work1, exp_work1, T.float32(-1.0))
+                T.max(exp_work0, exp_work0, exp_work1)
+                T.mul_C(exp_work0, exp_work0, T.float32(-1.0))
                 # Step 3: exp_work0 = exp(-gate)
-                T.ppl_exp2(exp_work0, exp_work1, gate_accum, exp_coeff, exp_table)
+                T.exp(exp_work0)
                 # Step 4: exp_work1 = exp(-gate) + 1
-                T.ppl_add_C(exp_work1, exp_work0, T.float32(1.0))
+                T.add_C(exp_work1, exp_work0, T.float32(1.0))
                 # Step 5: gate_accum = gate / (exp(-gate) + 1) = silu(gate)
-                T.ppl_div(gate_accum, C_temp, exp_work1)
+                T.div(gate_accum, C_temp, exp_work1)
                 # Step 6: C_temp = silu(gate) * up
-                T.ppl_mul(C_temp, gate_accum, up_accum)
+                T.mul(C_temp, gate_accum, up_accum)
 
                 # Step 7: Clamp to fp16 representable range [-65500, 65500]
                 fp16_max = T.float32(65500.0)
-                T.ppl_mul_C(exp_work1, C_temp, T.float32(-1.0))
-                T.ppl_fill(exp_work0, -fp16_max)
-                T.ppl_max(exp_work1, exp_work1, exp_work0)
-                T.ppl_mul_C(exp_work1, exp_work1, T.float32(-1.0))
-                T.ppl_fill(exp_work0, T.float32(-65500.0))
-                T.ppl_max(C_temp, exp_work1, exp_work0)
+                T.mul_C(exp_work1, C_temp, T.float32(-1.0))
+                T.fill(exp_work0, -fp16_max)
+                T.max(exp_work1, exp_work1, exp_work0)
+                T.mul_C(exp_work1, exp_work1, T.float32(-1.0))
+                T.fill(exp_work0, T.float32(-65500.0))
+                T.max(C_temp, exp_work1, exp_work0)
 
                 # Store to Act buffer (fp32 → fp16 via A_shared)
-                T.ppl_copy(C_temp, A_shared)
-                T.ppl_copy(A_shared, Act[by * block_M, n_tile * block_N])
+                T.copy(C_temp, A_shared)
+                T.copy(A_shared, Act[by * block_M, n_tile * block_N])
 
             if N_tail != 0:
-                T.ppl_fill(gate_tail, T.float32(0))
-                T.ppl_fill(up_tail, T.float32(0))
+                T.fill(gate_tail, T.float32(0))
+                T.fill(up_tail, T.float32(0))
                 for k_tile in T.serial(K_tiles):
-                    T.ppl_copy(X[by * block_M, k_tile * block_K], A_shared)
-                    T.ppl_copy(W_gate[N_tiles_full * block_N, k_tile * block_K], W_tail)
-                    T.ppl_gemm(A_shared, W_tail, C_tail, transpose_B=True)
-                    T.ppl_add(gate_tail, gate_tail, C_tail)
-                    T.ppl_copy(W_up[N_tiles_full * block_N, k_tile * block_K], W_tail)
-                    T.ppl_gemm(A_shared, W_tail, C_tail, transpose_B=True)
-                    T.ppl_add(up_tail, up_tail, C_tail)
+                    T.copy(X[by * block_M, k_tile * block_K], A_shared)
+                    T.copy(W_gate[N_tiles_full * block_N, k_tile * block_K], W_tail)
+                    T.gemm(A_shared, W_tail, C_tail, transpose_B=True)
+                    T.add(gate_tail, gate_tail, C_tail)
+                    T.copy(W_up[N_tiles_full * block_N, k_tile * block_K], W_tail)
+                    T.gemm(A_shared, W_tail, C_tail, transpose_B=True)
+                    T.add(up_tail, up_tail, C_tail)
 
-                T.ppl_copy(gate_tail, C_tail)
-                T.ppl_mul_C(tail_work0, gate_tail, T.float32(-1.0))
-                T.ppl_fill(tail_work1, T.float32(88.72))
-                T.ppl_mul_C(tail_work0, tail_work0, T.float32(-1.0))
-                T.ppl_mul_C(tail_work1, tail_work1, T.float32(-1.0))
-                T.ppl_max(tail_work0, tail_work0, tail_work1)
-                T.ppl_mul_C(tail_work0, tail_work0, T.float32(-1.0))
-                T.ppl_exp2(tail_work0, tail_work1, gate_tail, exp_coeff, exp_table)
-                T.ppl_add_C(tail_work1, tail_work0, T.float32(1.0))
-                T.ppl_div(gate_tail, C_tail, tail_work1)
-                T.ppl_mul(C_tail, gate_tail, up_tail)
+                T.copy(gate_tail, C_tail)
+                T.mul_C(tail_work0, gate_tail, T.float32(-1.0))
+                T.fill(tail_work1, T.float32(88.72))
+                T.mul_C(tail_work0, tail_work0, T.float32(-1.0))
+                T.mul_C(tail_work1, tail_work1, T.float32(-1.0))
+                T.max(tail_work0, tail_work0, tail_work1)
+                T.mul_C(tail_work0, tail_work0, T.float32(-1.0))
+                T.exp(tail_work0)
+                T.add_C(tail_work1, tail_work0, T.float32(1.0))
+                T.div(gate_tail, C_tail, tail_work1)
+                T.mul(C_tail, gate_tail, up_tail)
 
                 fp16_max = T.float32(65500.0)
-                T.ppl_mul_C(tail_work1, C_tail, T.float32(-1.0))
-                T.ppl_fill(tail_work0, -fp16_max)
-                T.ppl_max(tail_work1, tail_work1, tail_work0)
-                T.ppl_mul_C(tail_work1, tail_work1, T.float32(-1.0))
-                T.ppl_fill(tail_work0, T.float32(-65500.0))
-                T.ppl_max(C_tail, tail_work1, tail_work0)
+                T.mul_C(tail_work1, C_tail, T.float32(-1.0))
+                T.fill(tail_work0, -fp16_max)
+                T.max(tail_work1, tail_work1, tail_work0)
+                T.mul_C(tail_work1, tail_work1, T.float32(-1.0))
+                T.fill(tail_work0, T.float32(-65500.0))
+                T.max(C_tail, tail_work1, tail_work0)
 
-                T.ppl_copy(C_tail, A_tail)
-                T.ppl_copy(A_tail, Act[by * block_M, N_tiles_full * block_N])
+                T.copy(C_tail, A_tail)
+                T.copy(A_tail, Act[by * block_M, N_tiles_full * block_N])
 
             # ============================================================
             # Phase 2: Down projection (D-tile serial loop).
             # Reads pre-computed Act from global memory.
             # ============================================================
             for d_tile in T.serial(D_tiles):
-                T.ppl_fill(down_accum, T.float32(0))
+                T.fill(down_accum, T.float32(0))
 
                 for n_tile in T.serial(N_tiles_full):
                     # Load pre-computed SiLU(gate)*up for this N-tile
-                    T.ppl_copy(Act[by * block_M, n_tile * block_N], A_shared)
+                    T.copy(Act[by * block_M, n_tile * block_N], A_shared)
                     # Load W_down slice for this D-tile, N-tile
-                    T.ppl_copy(
+                    T.copy(
                         W_down[d_tile * block_D, n_tile * block_N], W_shared)
-                    T.ppl_gemm(A_shared, W_shared, C_temp, transpose_B=True)
-                    T.ppl_add(down_accum, down_accum, C_temp)
+                    T.gemm(A_shared, W_shared, C_temp, transpose_B=True)
+                    T.add(down_accum, down_accum, C_temp)
 
                 if N_tail != 0:
-                    T.ppl_copy(Act[by * block_M, N_tiles_full * block_N], A_tail)
-                    T.ppl_copy(
+                    T.copy(Act[by * block_M, N_tiles_full * block_N], A_tail)
+                    T.copy(
                         W_down[d_tile * block_D, N_tiles_full * block_N], W_down_tail)
-                    T.ppl_gemm(A_tail, W_down_tail, C_temp, transpose_B=True)
-                    T.ppl_add(down_accum, down_accum, C_temp)
+                    T.gemm(A_tail, W_down_tail, C_temp, transpose_B=True)
+                    T.add(down_accum, down_accum, C_temp)
 
                 # Cast and store output
                 # Reuse A_shared (free after N-tile loop) as fp16 output buffer
-                T.ppl_copy(down_accum, A_shared)
-                T.ppl_copy(A_shared, Output[by * block_M, d_tile * block_D])
+                T.copy(down_accum, A_shared)
+                T.copy(A_shared, Output[by * block_M, d_tile * block_D])
 
     return main_kernel_inner
 
@@ -306,14 +304,11 @@ def mlp_w8a16_fused_kernel_streaming_fullk(
             gate_orig = T.alloc_shared((block_M, block_N), accum_dtype)
             gate_f32 = T.alloc_shared((block_M, block_N), accum_dtype)
             work0 = T.alloc_shared((block_M, block_N), accum_dtype)
-            work1 = T.alloc_shared((block_M, block_N), accum_dtype)
 
             down_accum = T.alloc_shared((block_M, hidden), accum_dtype)
             down_temp = T.alloc_shared((block_M, hidden), accum_dtype)
             out_local = T.alloc_shared((block_M, hidden), dtype)
 
-            exp_coeff = T.alloc_shared((64, 32), accum_dtype)
-            exp_table = T.alloc_shared((64, 192), accum_dtype)
 
             W_gate_tail = T.alloc_shared((N_tail_alloc, hidden), dtype)
             W_up_tail = T.alloc_shared((N_tail_alloc, hidden), dtype)
@@ -327,68 +322,66 @@ def mlp_w8a16_fused_kernel_streaming_fullk(
             tail_work0 = T.alloc_shared((block_M, N_tail_alloc), accum_dtype)
             tail_work1 = T.alloc_shared((block_M, N_tail_alloc), accum_dtype)
 
-            T.ppl_fill(down_accum, T.float32(0))
+            T.fill(down_accum, T.float32(0))
 
             if num_stages == 0:
                 for n_tile in T.serial(N_tiles_full):
-                    T.ppl_copy(X[by * block_M, 0], X_full)
-                    T.ppl_copy(W_gate[n_tile * block_N, 0], W_gate_full)
-                    T.ppl_copy(W_up[n_tile * block_N, 0], W_up_full)
+                    T.copy(X[by * block_M, 0], X_full)
+                    T.copy(W_gate[n_tile * block_N, 0], W_gate_full)
+                    T.copy(W_up[n_tile * block_N, 0], W_up_full)
 
-                    T.ppl_gemm(X_full, W_gate_full, gate_local, transpose_B=True)
-                    T.ppl_gemm(X_full, W_up_full, up_local, transpose_B=True)
+                    T.gemm(X_full, W_gate_full, gate_local, transpose_B=True)
+                    T.gemm(X_full, W_up_full, up_local, transpose_B=True)
 
                     # gate_f32 = silu(gate_local)
-                    T.ppl_copy(gate_local, gate_orig)
-                    T.ppl_sigmoid(work0, gate_orig, gate_f32, work1, exp_coeff, exp_table)
-                    T.ppl_copy(work0, sigmoid_local)
-                    T.ppl_mul(gate_local, gate_local, sigmoid_local)
-                    T.ppl_mul(act_local, gate_local, up_local)
+                    T.copy(gate_local, gate_orig)
+                    T.sigmoid(work0, gate_orig)
+                    T.copy(work0, sigmoid_local)
+                    T.mul(gate_local, gate_local, sigmoid_local)
+                    T.mul(act_local, gate_local, up_local)
 
-                    T.ppl_copy(W_down[0, n_tile * block_N], W_down_full)
-                    T.ppl_gemm(act_local, W_down_full, down_temp, transpose_B=True)
-                    T.ppl_add(down_accum, down_accum, down_temp)
+                    T.copy(W_down[0, n_tile * block_N], W_down_full)
+                    T.gemm(act_local, W_down_full, down_temp, transpose_B=True)
+                    T.add(down_accum, down_accum, down_temp)
             else:
                 for n_tile in T.Pipelined(N_tiles_full, num_stages=num_stages):
-                    T.ppl_copy(X[by * block_M, 0], X_full)
-                    T.ppl_copy(W_gate[n_tile * block_N, 0], W_gate_full)
-                    T.ppl_copy(W_up[n_tile * block_N, 0], W_up_full)
+                    T.copy(X[by * block_M, 0], X_full)
+                    T.copy(W_gate[n_tile * block_N, 0], W_gate_full)
+                    T.copy(W_up[n_tile * block_N, 0], W_up_full)
 
-                    T.ppl_gemm(X_full, W_gate_full, gate_local, transpose_B=True)
-                    T.ppl_gemm(X_full, W_up_full, up_local, transpose_B=True)
+                    T.gemm(X_full, W_gate_full, gate_local, transpose_B=True)
+                    T.gemm(X_full, W_up_full, up_local, transpose_B=True)
 
                     # gate_f32 = silu(gate_local)
-                    T.ppl_copy(gate_local, gate_orig)
-                    T.ppl_sigmoid(work0, gate_orig, gate_f32, work1, exp_coeff, exp_table)
-                    T.ppl_copy(work0, sigmoid_local)
-                    T.ppl_mul(gate_local, gate_local, sigmoid_local)
-                    T.ppl_mul(act_local, gate_local, up_local)
+                    T.copy(gate_local, gate_orig)
+                    T.sigmoid(work0, gate_orig)
+                    T.copy(work0, sigmoid_local)
+                    T.mul(gate_local, gate_local, sigmoid_local)
+                    T.mul(act_local, gate_local, up_local)
 
-                    T.ppl_copy(W_down[0, n_tile * block_N], W_down_full)
-                    T.ppl_gemm(act_local, W_down_full, down_temp, transpose_B=True)
-                    T.ppl_add(down_accum, down_accum, down_temp)
+                    T.copy(W_down[0, n_tile * block_N], W_down_full)
+                    T.gemm(act_local, W_down_full, down_temp, transpose_B=True)
+                    T.add(down_accum, down_accum, down_temp)
 
             if N_tail != 0:
-                T.ppl_copy(X[by * block_M, 0], X_full)
-                T.ppl_copy(W_gate[N_tiles_full * block_N, 0], W_gate_tail)
-                T.ppl_copy(W_up[N_tiles_full * block_N, 0], W_up_tail)
-                T.ppl_gemm(X_full, W_gate_tail, gate_tail, transpose_B=True)
-                T.ppl_gemm(X_full, W_up_tail, up_tail, transpose_B=True)
+                T.copy(X[by * block_M, 0], X_full)
+                T.copy(W_gate[N_tiles_full * block_N, 0], W_gate_tail)
+                T.copy(W_up[N_tiles_full * block_N, 0], W_up_tail)
+                T.gemm(X_full, W_gate_tail, gate_tail, transpose_B=True)
+                T.gemm(X_full, W_up_tail, up_tail, transpose_B=True)
 
-                T.ppl_copy(gate_tail, gate_tail_orig)
-                T.ppl_sigmoid(
-                    tail_work0, gate_tail_orig, gate_tail_f32,
-                    tail_work1, exp_coeff, exp_table)
-                T.ppl_copy(tail_work0, sigmoid_tail)
-                T.ppl_mul(gate_tail, gate_tail, sigmoid_tail)
-                T.ppl_mul(act_tail, gate_tail, up_tail)
+                T.copy(gate_tail, gate_tail_orig)
+                T.sigmoid(tail_work0, gate_tail_orig)
+                T.copy(tail_work0, sigmoid_tail)
+                T.mul(gate_tail, gate_tail, sigmoid_tail)
+                T.mul(act_tail, gate_tail, up_tail)
 
-                T.ppl_copy(W_down[0, N_tiles_full * block_N], W_down_tail)
-                T.ppl_gemm(act_tail, W_down_tail, down_temp, transpose_B=True)
-                T.ppl_add(down_accum, down_accum, down_temp)
+                T.copy(W_down[0, N_tiles_full * block_N], W_down_tail)
+                T.gemm(act_tail, W_down_tail, down_temp, transpose_B=True)
+                T.add(down_accum, down_accum, down_temp)
 
-            T.ppl_copy(down_accum, out_local)
-            T.ppl_copy(out_local, Output[by * block_M, 0])
+            T.copy(down_accum, out_local)
+            T.copy(out_local, Output[by * block_M, 0])
 
     return main_kernel_inner
 
@@ -405,7 +398,7 @@ def mlp_w8a16_fused_kernel_ppl_layout_streaming(
     but the weight tensors use the same contiguous layout as the PPL baseline:
     ``W_gate_col/W_up_col`` are ``[hidden, intermediate]`` and
     ``W_down_col`` is ``[intermediate, hidden]``.  This lets the down projection
-    use the existing non-transpose ``ppl_gemm`` accumulate path directly.
+    use the existing non-transpose TPU GEMM accumulate path directly.
     """
     if M % block_M != 0:
         block_M = _largest_supported_divisor((M,), block_M)
@@ -443,13 +436,10 @@ def mlp_w8a16_fused_kernel_ppl_layout_streaming(
             gate_f32 = T.alloc_shared((block_M, block_N), accum_dtype)
             up_f32 = T.alloc_shared((block_M, block_N), accum_dtype)
             work0 = T.alloc_shared((block_M, block_N), accum_dtype)
-            work1 = T.alloc_shared((block_M, block_N), accum_dtype)
 
             down_accum = T.alloc_shared((block_M, hidden), accum_dtype)
             out_local = T.alloc_shared((block_M, hidden), dtype)
 
-            exp_coeff = T.alloc_shared((64, 32), accum_dtype)
-            exp_table = T.alloc_shared((64, 192), accum_dtype)
 
             W_gate_tail = T.alloc_shared((hidden, N_tail_alloc), dtype)
             W_up_tail = T.alloc_shared((hidden, N_tail_alloc), dtype)
@@ -463,75 +453,73 @@ def mlp_w8a16_fused_kernel_ppl_layout_streaming(
             tail_work0 = T.alloc_shared((block_M, N_tail_alloc), accum_dtype)
             tail_work1 = T.alloc_shared((block_M, N_tail_alloc), accum_dtype)
 
-            T.ppl_fill(down_accum, T.float32(0))
+            T.fill(down_accum, T.float32(0))
 
             if num_stages == 0:
                 for n_tile in T.serial(N_tiles_full):
-                    T.ppl_copy(X[by * block_M, 0], X_full)
-                    T.ppl_copy(W_gate_col[0, n_tile * block_N], W_gate_full)
-                    T.ppl_copy(W_up_col[0, n_tile * block_N], W_up_full)
+                    T.copy(X[by * block_M, 0], X_full)
+                    T.copy(W_gate_col[0, n_tile * block_N], W_gate_full)
+                    T.copy(W_up_col[0, n_tile * block_N], W_up_full)
 
-                    T.ppl_fill(gate_f32, T.float32(0))
-                    T.ppl_gemm(X_full, W_gate_full, gate_f32)
-                    T.ppl_copy(gate_f32, gate_local)
+                    T.fill(gate_f32, T.float32(0))
+                    T.gemm(X_full, W_gate_full, gate_f32)
+                    T.copy(gate_f32, gate_local)
 
-                    T.ppl_fill(up_f32, T.float32(0))
-                    T.ppl_gemm(X_full, W_up_full, up_f32)
-                    T.ppl_copy(up_f32, up_local)
+                    T.fill(up_f32, T.float32(0))
+                    T.gemm(X_full, W_up_full, up_f32)
+                    T.copy(up_f32, up_local)
 
-                    T.ppl_sigmoid(work0, gate_f32, up_f32, work1, exp_coeff, exp_table)
-                    T.ppl_copy(work0, sigmoid_local)
-                    T.ppl_mul(gate_local, gate_local, sigmoid_local)
-                    T.ppl_mul(act_local, gate_local, up_local)
+                    T.sigmoid(work0, gate_f32)
+                    T.copy(work0, sigmoid_local)
+                    T.mul(gate_local, gate_local, sigmoid_local)
+                    T.mul(act_local, gate_local, up_local)
 
-                    T.ppl_copy(W_down_col[n_tile * block_N, 0], W_down_full)
-                    T.ppl_gemm(act_local, W_down_full, down_accum)
+                    T.copy(W_down_col[n_tile * block_N, 0], W_down_full)
+                    T.gemm(act_local, W_down_full, down_accum)
             else:
                 for n_tile in T.Pipelined(N_tiles_full, num_stages=num_stages):
-                    T.ppl_copy(X[by * block_M, 0], X_full)
-                    T.ppl_copy(W_gate_col[0, n_tile * block_N], W_gate_full)
-                    T.ppl_copy(W_up_col[0, n_tile * block_N], W_up_full)
+                    T.copy(X[by * block_M, 0], X_full)
+                    T.copy(W_gate_col[0, n_tile * block_N], W_gate_full)
+                    T.copy(W_up_col[0, n_tile * block_N], W_up_full)
 
-                    T.ppl_fill(gate_f32, T.float32(0))
-                    T.ppl_gemm(X_full, W_gate_full, gate_f32)
-                    T.ppl_copy(gate_f32, gate_local)
+                    T.fill(gate_f32, T.float32(0))
+                    T.gemm(X_full, W_gate_full, gate_f32)
+                    T.copy(gate_f32, gate_local)
 
-                    T.ppl_fill(up_f32, T.float32(0))
-                    T.ppl_gemm(X_full, W_up_full, up_f32)
-                    T.ppl_copy(up_f32, up_local)
+                    T.fill(up_f32, T.float32(0))
+                    T.gemm(X_full, W_up_full, up_f32)
+                    T.copy(up_f32, up_local)
 
-                    T.ppl_sigmoid(work0, gate_f32, up_f32, work1, exp_coeff, exp_table)
-                    T.ppl_copy(work0, sigmoid_local)
-                    T.ppl_mul(gate_local, gate_local, sigmoid_local)
-                    T.ppl_mul(act_local, gate_local, up_local)
+                    T.sigmoid(work0, gate_f32)
+                    T.copy(work0, sigmoid_local)
+                    T.mul(gate_local, gate_local, sigmoid_local)
+                    T.mul(act_local, gate_local, up_local)
 
-                    T.ppl_copy(W_down_col[n_tile * block_N, 0], W_down_full)
-                    T.ppl_gemm(act_local, W_down_full, down_accum)
+                    T.copy(W_down_col[n_tile * block_N, 0], W_down_full)
+                    T.gemm(act_local, W_down_full, down_accum)
 
             if N_tail != 0:
-                T.ppl_copy(X[by * block_M, 0], X_full)
-                T.ppl_copy(W_gate_col[0, N_tiles_full * block_N], W_gate_tail)
-                T.ppl_copy(W_up_col[0, N_tiles_full * block_N], W_up_tail)
+                T.copy(X[by * block_M, 0], X_full)
+                T.copy(W_gate_col[0, N_tiles_full * block_N], W_gate_tail)
+                T.copy(W_up_col[0, N_tiles_full * block_N], W_up_tail)
 
-                T.ppl_fill(gate_tail_f32, T.float32(0))
-                T.ppl_gemm(X_full, W_gate_tail, gate_tail_f32)
-                T.ppl_copy(gate_tail_f32, gate_tail)
+                T.fill(gate_tail_f32, T.float32(0))
+                T.gemm(X_full, W_gate_tail, gate_tail_f32)
+                T.copy(gate_tail_f32, gate_tail)
 
-                T.ppl_fill(up_tail_f32, T.float32(0))
-                T.ppl_gemm(X_full, W_up_tail, up_tail_f32)
-                T.ppl_copy(up_tail_f32, up_tail)
+                T.fill(up_tail_f32, T.float32(0))
+                T.gemm(X_full, W_up_tail, up_tail_f32)
+                T.copy(up_tail_f32, up_tail)
 
-                T.ppl_sigmoid(
-                    tail_work0, gate_tail_f32, up_tail_f32,
-                    tail_work1, exp_coeff, exp_table)
-                T.ppl_copy(tail_work0, sigmoid_tail)
-                T.ppl_mul(gate_tail, gate_tail, sigmoid_tail)
-                T.ppl_mul(act_tail, gate_tail, up_tail)
+                T.sigmoid(tail_work0, gate_tail_f32)
+                T.copy(tail_work0, sigmoid_tail)
+                T.mul(gate_tail, gate_tail, sigmoid_tail)
+                T.mul(act_tail, gate_tail, up_tail)
 
-                T.ppl_copy(W_down_col[N_tiles_full * block_N, 0], W_down_tail)
-                T.ppl_gemm(act_tail, W_down_tail, down_accum)
+                T.copy(W_down_col[N_tiles_full * block_N, 0], W_down_tail)
+                T.gemm(act_tail, W_down_tail, down_accum)
 
-            T.ppl_copy(down_accum, out_local)
-            T.ppl_copy(out_local, Output[by * block_M, 0])
+            T.copy(down_accum, out_local)
+            T.copy(out_local, Output[by * block_M, 0])
 
     return main_kernel_inner
