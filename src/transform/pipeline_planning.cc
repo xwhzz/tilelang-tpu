@@ -1297,9 +1297,15 @@ private:
           "mixed_gdma_bdc_windows_need_family_specific_materialization";
       decision.reason =
           "gemm_pipeline_with_elementwise_or_reduction_ops";
-      decision.allow_stage_optimization = false;
-      decision.enable_buffer_version_hints = false;
-      decision.enable_stage_aware_lmem = false;
+      // Opt-in: TL_TPU_ATTENTION_STAGE_OPT enables generic stage search +
+      // multi-version buffers for attention_mixed pipelines. This lets the
+      // existing inject_pipeline pass emit K-prefetch double-buffering when
+      // num_stages>=2.
+      bool attention_stage_opt =
+          EnvFlagEnabled("TL_TPU_ATTENTION_STAGE_OPT", false);
+      decision.allow_stage_optimization = attention_stage_opt;
+      decision.enable_buffer_version_hints = attention_stage_opt;
+      decision.enable_stage_aware_lmem = attention_stage_opt;
       return decision;
     }
 
@@ -2731,6 +2737,67 @@ private:
         TryApplyTpuStageOptimizerV0(num_stages, &pipeline_stage_infos,
                                     &optimizer_decision);
       }
+      // Attention-specific post-process: only the first S2L load (K) benefits
+      // from cross-iter prefetch; later loads (V) are already overlapped with
+      // the inner-iteration softmax via tpu_parallel markers. Double-buffering
+      // V costs LMEM + an extra prologue GDMA without saving wall-clock.
+      //
+      // Mechanism: stage search keeps every load at stage=0 (per
+      // AllowedTpuStagesForRole). Double-buffering arises from any RAW dep
+      // whose load_stage < consumer_stage. To suppress V double-buffering,
+      // promote the non-first loads to the same stage as the highest
+      // consumer in the search result (typically max_stage = num_stages-1),
+      // so load_stage == consumer_stage => stage_distance == 0 => 1 version.
+      if (policy.policy_family == "attention_mixed" &&
+          EnvFlagEnabled("TL_TPU_K_ONLY_DOUBLE_BUFFER", true)) {
+        int max_seen_stage = 0;
+        for (const auto &pinfo : pipeline_stage_infos) {
+          max_seen_stage = std::max(max_seen_stage, pinfo.stage);
+        }
+        if (max_seen_stage > 0) {
+          bool seen_load = false;
+          bool promoted = false;
+          for (auto &pinfo : pipeline_stage_infos) {
+            if (pinfo.tpu_pipeline_role != "load") continue;
+            if (!seen_load) {
+              seen_load = true;
+              continue;
+            }
+            if (pinfo.stage < max_seen_stage) {
+              pinfo.stage = max_seen_stage;
+              promoted = true;
+            }
+          }
+          if (promoted) {
+            // Re-sort orders so promoted loads sit with later stages but
+            // appear at the *front* of their new stage — that puts the V
+            // load before the softmax compute chain, enabling overlap with
+            // the BDC ops via the inner tpu_parallel section.
+            std::vector<size_t> indices(pipeline_stage_infos.size());
+            for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+            std::stable_sort(indices.begin(), indices.end(),
+                             [&](size_t lhs, size_t rhs) {
+                               const auto &l = pipeline_stage_infos[lhs];
+                               const auto &r = pipeline_stage_infos[rhs];
+                               if (l.stage != r.stage) return l.stage < r.stage;
+                               // Within a stage: promoted loads come first.
+                               bool l_promoted_load =
+                                   l.tpu_pipeline_role == "load" &&
+                                   l.original_order > 0;
+                               bool r_promoted_load =
+                                   r.tpu_pipeline_role == "load" &&
+                                   r.original_order > 0;
+                               if (l_promoted_load != r_promoted_load)
+                                 return l_promoted_load;
+                               return l.original_order < r.original_order;
+                             });
+            for (size_t order = 0; order < indices.size(); ++order) {
+              pipeline_stage_infos[indices[order]].order = static_cast<int>(order);
+            }
+            optimizer_decision += ":k_only_double_buffer";
+          }
+        }
+      }
     } else if (IsTpuTarget()) {
       optimizer_decision =
           "legacy_heuristic:policy_stage_optimization_disabled:" +
@@ -2780,7 +2847,7 @@ private:
     if (has_async_copy)
       annotations.Set(tir::attr::software_pipeline_async_stages,
                       Array<Integer>{0});
-    if (has_selected_attention_window) {
+    if (has_selected_attention_window && !policy.allow_stage_optimization) {
       Map<String, Integer> window_annotation;
       window_annotation.Set("load_statement",
                             Integer(selected_attention_window.load_statement));

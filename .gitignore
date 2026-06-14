@@ -102,3 +102,8 @@ tilelang/jit/adapter/cython/.cycache
 
 # tpu_benchmark generated benchmark outputs
 tpu_benchmark/results/
+tpu_benchmark/*.xlsx
+
+# experimental no-pipeline mirrors (kept locally only)
+tpu_benchmark/flash_attention_opt_noPipe/
+tpu_benchmark/matmul_nopipe/

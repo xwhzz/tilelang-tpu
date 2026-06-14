@@ -195,7 +195,11 @@ StageAwareLmemPolicy DecideStageAwareLmemPolicy(const PrimFunc &f) {
   if (collector.has_gemm && collector.has_mixed_compute) {
     policy.kind = "mixed_gemm";
     policy.reason = "gemm_function_with_elementwise_or_reduction_ops";
-    policy.enabled = false;
+    // Opt-in: when attention_mixed pipelines have been promoted to a
+    // multi-versioned schedule (via TL_TPU_ATTENTION_STAGE_OPT), allow
+    // sibling-conflict-aware bank placement for those versioned buffers.
+    policy.enabled =
+        std::getenv("TL_TPU_ATTENTION_STAGE_AWARE_LMEM") != nullptr;
     return policy;
   }
   policy.kind = "elementwise_or_generic";
@@ -510,6 +514,14 @@ public:
         kv.second.end = 0;
       }
     }
+    if (std::getenv("TL_TPU_DISABLE_LIVE_RANGE")) {
+      // Force every buffer to be live for the entire kernel, so the
+      // allocator cannot reuse the same address for any pair of buffers.
+      for (auto &kv : *live_ranges_) {
+        kv.second.start = 0;
+        kv.second.end = std::numeric_limits<uint32_t>::max();
+      }
+    }
   }
 
 private:
@@ -819,6 +831,9 @@ PrimFunc InferAddress(PrimFunc f) {
   }
   BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)
       .Analyze(f->body);
+  if (std::getenv("TL_TPU_DISABLE_BANK_CONFLICT_AWARE")) {
+    bank_conflict_map.clear();
+  }
   StageAwareLmemPolicy stage_aware_lmem_policy =
       DecideStageAwareLmemPolicy(f);
   bool stage_aware_lmem = stage_aware_lmem_policy.enabled;
