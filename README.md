@@ -1,4 +1,31 @@
-# TileLang-TPU
+## Table of Contents
+
+- [Paper Appendix](#paper-appendix)
+- [Highlights](#highlights)
+- [What This Project Does](#what-this-project-does)
+- [Current Status](#current-status)
+- [Requirements](#requirements)
+- [Key TPU Paths](#key-tpu-paths)
+- [Quick Start](#quick-start)
+  - [1. Prepare the repository](#1-prepare-the-repository)
+  - [2. Build and install](#2-build-and-install)
+  - [3. Run a TPU demo](#3-run-a-tpu-demo)
+- [Programming Model](#programming-model)
+- [Examples](#examples)
+- [Repository Layout](#repository-layout)
+- [Development Notes](#development-notes)
+- [Acknowledgements](#acknowledgements)
+
+## Paper Appendix
+
+The full appendix is shown below.
+
+![Appendix page 1](./appendix/page-1.png)
+![Appendix page 2](./appendix/page-2.png)
+![Appendix page 3](./appendix/page-3.png)
+![Appendix page 4](./appendix/page-4.png)
+
+## TileLang-TPU
 
 TileLang-TPU is a TPU-oriented extension of TileLang for SOPHGO accelerators. It preserves the TileLang Python DSL while adding TPU lowering, TPU code generation, and JIT runtime integration, enabling TileLang kernels to be compiled and executed on TPU platforms.
 
