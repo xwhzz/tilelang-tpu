@@ -1,0 +1,31 @@
+{
+  "name": "fig5_fused_ops",
+  "description": "Figure 5 fused workloads: optimized FlashAttention and MLP W8A16 dequantized forward.",
+  "benchmarks": [
+    {
+      "name": "flash_attention_opt_fixed_suite",
+      "figure": "fig5",
+      "operator": "flash_attention_opt",
+      "kind": "command",
+      "args": [
+        "python",
+        "tpu_benchmark/flash_attention_opt/run_head_batched_suite.py",
+        "--configs",
+        "all",
+        "--out-dir",
+        "{out_dir}/flash_attention_opt",
+        "--timeout",
+        "1200"
+      ],
+      "timeout_sec": 14400
+    },
+    {
+      "name": "mlp_w8a16_dq_forward",
+      "figure": "fig5",
+      "operator": "mlp_w8a16_dq_forward",
+      "script": "tpu_benchmark/mlp_w8a16_dq_forward/bench_mlp_w8a16_dq_forward.py",
+      "timeout_sec": 3600
+    }
+  ]
+}
+

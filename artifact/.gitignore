@@ -1,0 +1,6 @@
+results/*
+!results/.gitignore
+figures/generated/*
+!figures/generated/.gitignore
+*.log
+__pycache__/

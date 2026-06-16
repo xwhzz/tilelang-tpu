@@ -1,0 +1,33 @@
+{
+  "name": "fig6_ablation",
+  "description": "Representative Figure 6 ablation for structured pipeline lowering and bank-aware LMEM placement.",
+  "cases": [
+    {
+      "name": "flash_attention_opt_fp16_b1_h8_s128_d64",
+      "operator": "flash_attention_opt",
+      "dtype": "fp16",
+      "shape": "B1H8S128D64",
+      "script": "tpu_benchmark/flash_attention_opt/bench_flashattn_fp16_b1_h8_s128_d64.py",
+      "stage_pattern": "NUM_STAGES = 1",
+      "stage_replacement": "NUM_STAGES = 0",
+      "timeout_sec": 900
+    },
+    {
+      "name": "matmul_fp16_128x128x128",
+      "operator": "matmul",
+      "dtype": "fp16",
+      "shape": "128x128x128",
+      "script": "tpu_benchmark/matmul/bench_matmul_fp16_128x128x128.py",
+      "stage_pattern": "num_stages=1",
+      "stage_replacement": "num_stages=0",
+      "timeout_sec": 900
+    }
+  ],
+  "variants": [
+    {"name": "baseline", "pipeline_off": false, "address_off": false},
+    {"name": "pipeline_off", "pipeline_off": true, "address_off": false},
+    {"name": "address_off", "pipeline_off": false, "address_off": true},
+    {"name": "joint_off", "pipeline_off": true, "address_off": true}
+  ]
+}
+

@@ -1,0 +1,17 @@
+{
+  "name": "smoke_cmodel",
+  "description": "Correctness-only cmodel smoke. It uses the CPU-hosted TPU simulator and does not measure paper performance.",
+  "benchmarks": [
+    {
+      "name": "swiglu_fp32_cmodel",
+      "figure": "smoke",
+      "operator": "swiglu",
+      "dtype": "fp32",
+      "shape": "64x64",
+      "script": "tpu_demo/tpu_test_swiglu_fp32_cmodel.py",
+      "timeout_sec": 900,
+      "mode": "cmodel"
+    }
+  ]
+}
+

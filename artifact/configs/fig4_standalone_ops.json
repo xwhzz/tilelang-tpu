@@ -1,0 +1,52 @@
+{
+  "name": "fig4_standalone_ops",
+  "description": "Figure 4 standalone operators: Add, RoPE, SwiGLU, Matmul, RMSNorm.",
+  "matrix": [
+    {
+      "figure": "fig4",
+      "operator": "elementwise_add",
+      "script_template": "tpu_benchmark/elementwise_add/bench_add_{dtype}_{size}x{size}.py",
+      "dtypes": ["bf16", "fp16", "fp32"],
+      "sizes": [64, 128, 256, 512, 1024],
+      "shape_template": "{size}x{size}",
+      "timeout_sec": 300
+    },
+    {
+      "figure": "fig4",
+      "operator": "rope",
+      "script_template": "tpu_benchmark/rope/bench_rope_{dtype}_{size}x{size}.py",
+      "dtypes": ["bf16", "fp16", "fp32"],
+      "sizes": [64, 128, 256, 512, 1024],
+      "shape_template": "{size}x{size}",
+      "timeout_sec": 300
+    },
+    {
+      "figure": "fig4",
+      "operator": "swiglu",
+      "script_template": "tpu_benchmark/swiglu/bench_swiglu_{dtype}_{size}x{size}.py",
+      "dtypes": ["bf16", "fp16", "fp32"],
+      "sizes": [64, 128, 256, 512, 1024],
+      "shape_template": "{size}x{size}",
+      "timeout_sec": 300
+    },
+    {
+      "figure": "fig4",
+      "operator": "matmul",
+      "script_template": "tpu_benchmark/matmul/bench_matmul_{dtype}_{size}x{size}x{size}.py",
+      "dtypes": ["bf16", "fp16", "fp32"],
+      "sizes": [64, 128, 256, 512, 1024],
+      "shape_template": "{size}x{size}x{size}",
+      "timeout_sec": 900
+    },
+    {
+      "figure": "fig4",
+      "operator": "rmsnorm_opt",
+      "script_template": "tpu_benchmark/rmsnorm_opt/bench_rmsnorm_{dtype}_{size}x{size}.py",
+      "dtypes": ["bf16", "fp16", "fp32"],
+      "sizes": [64, 128, 256, 512, 1024],
+      "shape_template": "{size}x{size}",
+      "timeout_sec": 300
+    }
+  ]
+}
+

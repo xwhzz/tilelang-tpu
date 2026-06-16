@@ -1,0 +1,32 @@
+{
+  "paper_title": "Practical: Retargeting AI Kernel DSLs Beyond GPUs: An Experience Report on Refactoring TileLang to Sophgo TPUs",
+  "commit_reference": "16e440cbd6a67f96e90b170882f3ff6dacdc5f29",
+  "paper_dir": "docs/research/paper_writing/Tilelang_TPU_CGO_submitted",
+  "protocol": {
+    "hardware": "SOPHGO BM1690 PCIe",
+    "warmup": 5,
+    "repeats": 10,
+    "speedup": "PPL latency / TileLang-TPU latency",
+    "cmodel": "correctness only"
+  },
+  "figures": {
+    "fig4": {
+      "file": "artifact/figures/paper/exp_ops_speedup_one_row.pdf",
+      "operators": ["elementwise_add", "rope", "swiglu", "matmul", "rmsnorm"],
+      "claim": "Standalone operators have average speedups from 1.05x to 1.23x over PPL."
+    },
+    "fig5": {
+      "file": "artifact/figures/paper/exp_attention_mlp_speedup_halfcol.pdf",
+      "claim": "Optimized FlashAttention averages 12.50x speedup and MLP W8A16 averages about 1.01x over PPL."
+    },
+    "fig6": {
+      "file": "artifact/figures/paper/ablation/ab_speedup_vs_ppl_split.pdf",
+      "claim": "Structured pipeline lowering and bank-aware LMEM placement both contribute positive speedup on representative FlashAttention and Matmul cases."
+    }
+  },
+  "known_boundaries": [
+    "FlashAttention fp32 is excluded from valid TL/PPL performance comparison.",
+    "Matmul fp32 follows BM1690 GEMM input semantics: fp32 input/output, fp16 GEMM operands, fp32 accumulation.",
+    "Cmodel validates correctness and does not reproduce PCIe performance."
+  ]
+}

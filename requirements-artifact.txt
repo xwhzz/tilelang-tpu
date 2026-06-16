@@ -1,0 +1,6 @@
+# Minimal Python packages used by the artifact scripts and benchmark harness.
+# The project build still uses requirements-build.txt and requirements.txt.
+numpy
+torch
+matplotlib
+

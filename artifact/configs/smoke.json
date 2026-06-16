@@ -1,0 +1,43 @@
+{
+  "name": "smoke_pcie",
+  "description": "Short BM1690 PCIe smoke suite covering standalone operators and an optimized fused kernel.",
+  "benchmarks": [
+    {
+      "name": "add_fp16_64x64",
+      "figure": "smoke",
+      "operator": "elementwise_add",
+      "dtype": "fp16",
+      "shape": "64x64",
+      "script": "tpu_benchmark/elementwise_add/bench_add_fp16_64x64.py",
+      "timeout_sec": 300
+    },
+    {
+      "name": "matmul_fp16_128x128x128",
+      "figure": "smoke",
+      "operator": "matmul",
+      "dtype": "fp16",
+      "shape": "128x128x128",
+      "script": "tpu_benchmark/matmul/bench_matmul_fp16_128x128x128.py",
+      "timeout_sec": 300
+    },
+    {
+      "name": "rmsnorm_opt_fp16_128x128",
+      "figure": "smoke",
+      "operator": "rmsnorm_opt",
+      "dtype": "fp16",
+      "shape": "128x128",
+      "script": "tpu_benchmark/rmsnorm_opt/bench_rmsnorm_fp16_128x128.py",
+      "timeout_sec": 300
+    },
+    {
+      "name": "flash_attention_opt_fp16_b1_h8_s128_d64",
+      "figure": "smoke",
+      "operator": "flash_attention_opt",
+      "dtype": "fp16",
+      "shape": "B1H8S128D64",
+      "script": "tpu_benchmark/flash_attention_opt/bench_flashattn_fp16_b1_h8_s128_d64.py",
+      "timeout_sec": 600
+    }
+  ]
+}
+

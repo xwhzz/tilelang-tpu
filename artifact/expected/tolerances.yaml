@@ -1,0 +1,27 @@
+default:
+  fp32:
+    atol: 1.0e-2
+    rtol: 1.0e-2
+  fp16:
+    atol: 1.0e-1
+    rtol: 1.0e-1
+  bf16:
+    atol: 1.0e-1
+    rtol: 1.0e-1
+flash_attention:
+  fp16:
+    atol: 1.0e-2
+    rtol: 1.0e-2
+  bf16:
+    atol: 2.0e-2
+    rtol: 2.0e-2
+  fp32:
+    status: excluded
+    reason: BM1690 PPL/fmm2 path is not a valid full-fp32 FlashAttention comparison.
+mlp_w8a16_dq_forward:
+  fp16:
+    atol: 2.0e-1
+    rtol: 2.0e-1
+matmul_fp32:
+  semantics: fp32 input/output with fp16 GEMM operands and fp32 accumulation.
+

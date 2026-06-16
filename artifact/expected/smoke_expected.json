@@ -1,0 +1,11 @@
+{
+  "pcie": {
+    "required": ["tilelang correctness", "PPL correctness", "average execution time"],
+    "performance": "Smoke values only check that both backends run. They do not replace the full paper matrix."
+  },
+  "cmodel": {
+    "required": ["TileLang compile with mode=cmodel", "emulator execution", "torch allclose true"],
+    "performance": "No performance claim is made from cmodel latency."
+  }
+}
+
