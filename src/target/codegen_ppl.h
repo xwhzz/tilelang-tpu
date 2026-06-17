@@ -70,7 +70,8 @@ public:
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const LetStmtNode *op) final;
-  void VisitExpr_(const FloorModNode *op, std::ostream &os);
+  void VisitExpr_(const FloorDivNode *op, std::ostream &os) final;
+  void VisitExpr_(const FloorModNode *op, std::ostream &os) final;
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const PrimFunc &f);
