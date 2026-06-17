@@ -1097,9 +1097,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto c_access_data =
           var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
 
-      auto M = Downcast<IntImm>(op->args[6])->value;
-      auto N = Downcast<IntImm>(op->args[7])->value;
-      auto K = Downcast<IntImm>(op->args[8])->value;
+      auto M = buffer_shape[a_access_data][0];
+      auto N = buffer_shape[b_access_data][1];
+      auto K = buffer_shape[a_access_data][1];
       auto trans_B = Downcast<Bool>(op->args[5])->value;
 
       auto a_dtype = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
@@ -1107,13 +1107,13 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto c_dtype = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
       const char* left_right_dtype = AsBDTypeStr(a_dtype);
       // 非转置路径：累加需要数据类型为FP32
-      const char* output_dtype_accum = "DT_FP32"; 
+      const char* output_dtype_accum = "DT_FP32";
       // 转置路径：若C与A/B同精度则可用同精度，否则用FP32
       const char* output_dtype_trans =
           (std::string(AsBDTypeStr(c_dtype)) == left_right_dtype) ? left_right_dtype : "DT_FP32";
 
-      std::string M_K_N = std::to_string(M) + ", " + std::to_string(K) + ", " +
-                          std::to_string(N);
+      std::string M_K_N = FormatPrimExpr(M) + ", " + FormatPrimExpr(K) + ", " +
+                          FormatPrimExpr(N);
       this->PrintIndent();
       if (!trans_B)
         this->stream << "tpu_bdc_fp_mm(" << c_access_data << ".addr, "
@@ -1126,13 +1126,112 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                      << M_K_N << ", " << output_dtype_trans << ", "
                      << left_right_dtype << ");\n";
     } else if (op_name == "ppl.sub") {
-      handle_elementwise("tpu_bdc_fp_sub", true);
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)) {
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        dtype = "DT_BFP16";
+      }
+      // Runtime dynamic stride: directly use src1.stride pointer (no static IntImm)
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_sub( " << dst << ".addr, " << src0 << ".addr, "
+                   << src1 << ".addr, "
+                   << "&" << dst << ".shape, "
+                   << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), "
+                   << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), "
+                   << "(" << src1 << ".default_stride ? NULL : &" << src1 << ".stride), "
+                    << dtype << ");\n";
     } else if (op_name == "ppl.mul") {
-      handle_elementwise("tpu_bdc_fp_mul", true);
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)) {
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)){
+        dtype = "DT_BFP16";
+      }
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_mul( " << dst << ".addr, " << src0 << ".addr, "
+                   << src1 << ".addr, "
+                   << "&" << dst << ".shape, "
+                   << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), "
+                   << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), "
+                   << "(" << src1 << ".default_stride ? NULL : &" << src1 << ".stride), "
+                   << dtype << ");\n";
     } else if (op_name == "ppl.add") {
-      handle_elementwise("tpu_bdc_fp_add", true);
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)) {
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)){
+        dtype = "DT_BFP16";
+      }
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_add( " << dst << ".addr, " << src0 << ".addr, "
+                   << src1 << ".addr, "
+                   << "&" << dst << ".shape, "
+                   << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), "
+                   << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), "
+                   << "(" << src1 << ".default_stride ? NULL : &" << src1 << ".stride), "
+                    << dtype << ");\n";
     } else if (op_name == "ppl.div") {
-      handle_elementwise("tpu_bdc_fp_div", true);
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+      auto src1 = var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)) {
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        dtype = "DT_BFP16";
+      }
+      this->PrintIndent();
+      this->stream << "{\n";
+      int sid = this->BeginScope();
+      this->PrintIndent();
+      this->stream << "dim4 __ppl_div_stride_tmp;\n";
+      this->PrintIndent();
+      this->stream << "const dim4* __ppl_div_stride_ptr;\n";
+      this->PrintIndent();
+      this->stream << "if (" << src1 << ".shape.w == 1 && " << src0 << ".shape.w != 1) {\n";
+      this->PrintIndent();
+      this->stream << "  tpu_aligned_stride(&__ppl_div_stride_tmp, 0, &" << src1 << ".shape, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "  __ppl_div_stride_tmp.w = 0;\n";
+      this->PrintIndent();
+      this->stream << "  __ppl_div_stride_ptr = &__ppl_div_stride_tmp;\n";
+      this->PrintIndent();
+      this->stream << "} else if (" << src1 << ".shape.w == " << src0 << ".shape.w) {\n";
+      this->PrintIndent();
+      this->stream << "  __ppl_div_stride_ptr = (" << src1 << ".default_stride ? NULL : &" << src1 << ".stride);\n";
+      this->PrintIndent();
+      this->stream << "} else {\n";
+      this->PrintIndent();
+      this->stream << "  __ppl_div_stride_ptr = (" << src1 << ".default_stride ? NULL : &" << src1 << ".stride);\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+      this->PrintIndent();
+      this->stream << "tpu_bdc_fp_div(" << dst << ".addr, " << src0 << ".addr, " << src1 << ".addr, " << "&" << dst << ".shape, " << "(" << dst << ".default_stride ? NULL : &" << dst << ".stride), " << "(" << src0 << ".default_stride ? NULL : &" << src0 << ".stride), " << "__ppl_div_stride_ptr, " << dtype << ");\n";
+      this->EndScope(sid);
+      this->PrintIndent();
+      this->stream << "}\n";
     } else if (op_name == "ppl.mul_C") {
       handle_elementwise_const("tpu_bdc_fp_mul_C");
     } else if (op_name == "ppl.add_C") {
@@ -1156,7 +1255,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ");\n";
       auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
       auto src0 = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
-      auto src0_shape = buffer_shape[src0];
       // void tpu_bdc_fp32_exp(local_addr_t dst_addr, local_addr_t src_addr,
       // local_addr_t work0_addr, local_addr_t work1_addr, local_addr_t
       // coeff_addr, local_addr_t table_addr, const dim4 *shape)
@@ -1205,9 +1303,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
       auto tmp_tensor =
           var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto eu_num = Downcast<IntImm>(op->args[4])->value;
-      auto align_w = Downcast<IntImm>(op->args[5])->value;
-      auto stride_n = Downcast<IntImm>(op->args[6])->value;
+      auto eu_num_expr = FormatPrimExpr(op->args[4]);
+      auto align_w_expr = FormatPrimExpr(op->args[5]);
+      auto stride_n_expr = FormatPrimExpr(op->args[6]);
       // 获取数据类型
       auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
       std::string dtype;
@@ -1225,9 +1323,11 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
 
       // 计算EU数和对齐尺寸
       this->PrintIndent();
-      this->stream << "int eu_num = " << eu_num << ";\n";
+      this->stream << "int eu_num = " << eu_num_expr << ";\n";
       this->PrintIndent();
-      this->stream << "int align_w = " << align_w << ";\n";
+      this->stream << "int align_w = " << align_w_expr << ";\n";
+      this->PrintIndent();
+      this->stream << "int stride_n = " << stride_n_expr << ";\n";
 
       // 创建pad_val; FP_NEG_MAX returns the integer bit-pattern of -MAX,
       // so we must populate the `u32` field to reinterpret the bits,
@@ -1264,7 +1364,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "if (align_w > " << input_tensor
                    << ".shape.w && align_w == eu_num) {\n";
       this->PrintIndent();
-      this->stream << "  dim4 padded_stride = {" << stride_n
+      this->stream << "  dim4 padded_stride = {" << stride_n_expr
                    << ", align_w, align_w, 1};\n";
       this->PrintIndent();
       this->stream << "  dim4 padded_shape = {" << input_tensor << ".shape.n, "
@@ -1330,7 +1430,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "    int offset = " << input_tensor
                    << ".shape.w * elem_size;\n";
       this->PrintIndent();
-      this->stream << "    dim4 fill_tensor_stride = {" << stride_n
+      this->stream << "    dim4 fill_tensor_stride = {" << stride_n_expr
                    << ", align_w, " << input_tensor << ".shape.w, 1};\n";
       this->PrintIndent();
       this->stream
@@ -1407,9 +1507,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
       auto tmp_tensor =
           var_idmap_[op->args[3].as<CallNode>()->args[1].as<VarNode>()];
-      auto eu_num = Downcast<IntImm>(op->args[4])->value;
-      auto align_w = Downcast<IntImm>(op->args[5])->value;
-      auto stride_n = Downcast<IntImm>(op->args[6])->value;
+      std::string eu_num = FormatPrimExpr(op->args[4]);
+      std::string align_w = FormatPrimExpr(op->args[5]);
+      std::string stride_n = FormatPrimExpr(op->args[6]);
 
       this->PrintIndent();
       int sid = this->BeginScope();
@@ -1443,6 +1543,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->stream << "int eu_num = " << eu_num << ";\n";
       this->PrintIndent();
       this->stream << "int align_w = " << align_w << ";\n";
+      this->PrintIndent();
+      this->stream << "int stride_n = " << stride_n << ";\n";
 
       // // 创建填充值（对于sum，使用0作为填充值）
       this->PrintIndent();
@@ -1702,7 +1804,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto index = var_idmap_[index_var];
       if (index.empty()) index = this->parameter_map[index_var->name_hint];
 
-      auto param_h = Downcast<IntImm>(op->args[4])->value;
+      std::string param_h_str = param;
+      if (!param_h_str.empty()) param_h_str += ".shape.c";
+      else param_h_str = "0";
       auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
       std::string dtype;
       if (dtype_ == DataType::Float(16)) dtype = "DT_FP16";
@@ -1715,7 +1819,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "tpu_gdma_h_gather_S2S("
                    << dst << ".addr, " << param << ".addr, " << index << ".addr, "
-                   << "false, (scalar_t){.u32 = 0}, &__gather_shape, " << param_h << ", "
+                   << "false, (scalar_t){.u32 = 0}, &__gather_shape, " << param_h_str << ", "
                    << "NULL, NULL, NULL, " << dtype << ");\n";
       this->PrintIndent();
       this->stream << "}\n";
@@ -1733,9 +1837,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto src = var_idmap_[src_var];
       if (src.empty()) src = this->parameter_map[src_var->name_hint];
 
-      auto K_val = Downcast<IntImm>(op->args[4])->value;
-      auto descended_val = Downcast<IntImm>(op->args[5])->value;
-      auto length_val = Downcast<IntImm>(op->args[6])->value;
+      std::string K_expr = FormatPrimExpr(op->args[4]);
+      std::string length_expr = FormatPrimExpr(op->args[6]);
+      std::string descended_expr = FormatPrimExpr(op->args[5]);
 
       auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
       std::string dtype;
@@ -1747,7 +1851,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          << "; HAU sort only supports fp32/int32/uint32";
 
       this->PrintIndent();
-      this->stream << "tpu_hau_sort_natural_index(" << dst_data << ".addr, " << dst_idx  << ".addr, " << src << ".addr, " << length_val << ", " << K_val << ", " << (descended_val ? "true" : "false") << ", " << dtype << ");\n";
+      this->stream << "tpu_hau_sort_natural_index(" << dst_data << ".addr, " << dst_idx  << ".addr, " << src << ".addr, " << length_expr << ", " << K_expr << ", " << "(" << descended_expr << " ? true : false)" << ", " << dtype << ");\n";
     }
 
   } else if (op->op.same_as(builtin::if_then_else())) {
@@ -2020,6 +2124,8 @@ void CodeGenTileLangPPL::VisitExpr_(const FloorModNode *op,
                                     std::ostream &os) { // NOLINT(*)
   PrintBinaryExpr(op, "%", os, this);
 }
+
+void CodeGenTileLangPPL::VisitExpr_(const FloorDivNode *op, std::ostream &os) { PrintBinaryExpr(op, "/", os, this); }
 
 void CodeGenTileLangPPL::PrintWmmaScope(const std::string &scope, DataType t,
                                         const VarNode *variable,
