@@ -167,6 +167,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  host_mod: Optional[tvm.IRModule] = None,
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
+                 optimized_mod: Optional[tvm.IRModule] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
                  mode: Literal["pcie", "cmodel"] = "pcie"):
@@ -181,14 +182,16 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
+        self.input_idx = [i for i in range(len(params)) if i not in self.result_idx]
         self.kernel_global_source = kernel_global_source
+        self.target = Target.canon_target(determine_target(target))
 
-        if isinstance(func_or_mod, tir.PrimFunc):
+        if is_tpu_target(self.target):
+            self.ir_module = optimized_mod
+        elif isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
-
-        self.target = Target.canon_target(determine_target(target))
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()
@@ -212,7 +215,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         if is_tpu_target(self.target):
-            self.lib.tilelang_tpu_run.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            self.lib.tilelang_tpu_run.argtypes = [
+                ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
             self.lib.tilelang_tpu_run.restype = ctypes.c_int
             # TODO: 暂时使用ctypes，后续考虑更高效cython
             def lambda_forward(*args):
@@ -227,11 +231,22 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     arg_buffers.append(buf)
                     arg_sizes.append(nbytes)
 
+                # Collect dynamic shape values from input tensors
+                dyn_vals = []
+                for buf_idx, dim_idx in self.dynamic_symbolic_map.values():
+                    if buf_idx in self.input_idx:
+                        arg_pos = self.input_idx.index(buf_idx)
+                        dyn_vals.append(int(args[arg_pos].shape[dim_idx]))
+                if dyn_vals:
+                    dyn_array = (ctypes.c_int * len(dyn_vals))(*dyn_vals)
+                else:
+                    dyn_array = ctypes.POINTER(ctypes.c_int)()  # NULL
+
                 argv = (ctypes.c_void_p * len(args))()
                 for i, buf in enumerate(arg_buffers):
                     argv[i] = ctypes.cast(buf, ctypes.c_void_p).value
 
-                ret = self.lib.tilelang_tpu_run(argv)
+                ret = self.lib.tilelang_tpu_run(argv, len(dyn_vals), dyn_array)
                 args_list = list(args)
                 for i in self.result_idx:
                     result_tensor = torch.empty(

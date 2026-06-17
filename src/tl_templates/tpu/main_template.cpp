@@ -36,7 +36,7 @@ void post(){{
   tpuRtStreamDestroy(stream);
 }}
 
-extern "C" int tilelang_tpu_run(void** args) {{
+extern "C" int tilelang_tpu_run(void** args, int num_dyn_dims, int* dyn_dims) {{
 {arg_declarations}
 
   int res = init();
@@ -63,7 +63,7 @@ extern "C" int tilelang_tpu_run(void** args) {{
 
   if (rst) {{
     printf("kernel_launch failed\n");
-    return 1;
+    return rst;
   }}
   printf("kernel_launch success\n");
 

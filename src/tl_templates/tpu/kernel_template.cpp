@@ -1,5 +1,6 @@
 #include "kernel.h"
 #include <ppl_mem.h>
+#include <cstdint>
 #include <cstdio>
 #include <mutex>
 #include <memory>
@@ -16,11 +17,11 @@ extern tpuRtKernelModule_t tpu_module;
 #define MAX(x, y) (((x)) > ((y)) ? (x) : (y))
 
 int {function_name}_check_mem({func_params}) {{
-  return 0;
+{check_mem_body}
 }}
 
 int {function_name}_check_mem_s(tpu_kernel_api_{function_name}_t *api) {{
-  return 0;
+{check_mem_s_body}
 }}
 
 tpu_kernel_api_{function_name}_t fill_{function_name}_struct({func_params}) {{
@@ -34,6 +35,10 @@ int {function_name}({func_params}) {{
   tpu_kernel_api_{function_name}_t api;
   int ret = 0;
   {struct_assignments}
+  ret = {function_name}_check_mem_s(&api);
+  if (ret != 0) {{
+      return ret;
+  }}
   int group_num = 1;
   int block_num = 1;
   tpu_kernel_api_{function_name}_t apis[core_num];
