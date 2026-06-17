@@ -1,6 +1,6 @@
-# Practical: Retargeting AI Kernel DSLs Beyond GPUs: An Experience Report on Refactoring TileLang to Sophgo TPUs
+# TileLang-TPU Artifact Guide
 
-This directory is the reviewer entry point for the paper artifact. TileLang-TPU is the system under review. The artifact contains install commands, smoke tests, BM1690 PCIe reproduction scripts, cmodel correctness checks, expected paper claims, copied paper figures, result parsers, and manifest checks.
+This directory is the canonical artifact guide for the paper "Practical: Retargeting AI Kernel DSLs Beyond GPUs: An Experience Report on Refactoring TileLang to Sophgo TPUs". TileLang-TPU is the system under review. The artifact contains install commands, smoke tests, BM1690 PCIe reproduction scripts, cmodel correctness checks, expected paper claims, copied paper figures, result parsers, and manifest checks.
 
 The target badge is **Artifacts Evaluated, Functional**. A **Reusable** review is also possible when the reviewer has access to the SOPHGO BM1690 software stack.
 
@@ -30,6 +30,15 @@ The paper figures are copied under `artifact/figures/paper/`. The README links t
 | Pipeline and address ablation | [ab_speedup_vs_ppl_split.pdf](figures/paper/ablation/ab_speedup_vs_ppl_split.pdf) | Pipeline lowering and bank-aware LMEM placement each contribute positive speedup on representative cases. | `python artifact/scripts/run_ablation.py` |
 
 The machine-readable claim file is [expected/paper_claims.json](expected/paper_claims.json). Correctness tolerances are in [expected/tolerances.yaml](expected/tolerances.yaml).
+
+## Paper Appendix
+
+The required paper appendix is rendered in the repository landing page and stored under `../appendix/`:
+
+- [page-1.png](../appendix/page-1.png)
+- [page-2.png](../appendix/page-2.png)
+- [page-3.png](../appendix/page-3.png)
+- [page-4.png](../appendix/page-4.png)
 
 ## Requirements
 
@@ -170,5 +179,6 @@ This helper copies the submitted figures. It does not recompute performance valu
 | `artifact/scripts/` | Environment checks, runners, parsers, figure-copy helper, manifest verifier. |
 | `artifact/expected/` | Expected paper claims, tolerances, and smoke expectations. |
 | `artifact/figures/paper/` | Submitted paper figures copied into the artifact. |
+| `appendix/` | Required paper appendix pages rendered as PNG. |
 | `tpu_benchmark/` | Benchmark implementations for TileLang-TPU and PPL baselines. |
 | `tpu_demo/` | Small TPU and cmodel examples used for diagnostics. |

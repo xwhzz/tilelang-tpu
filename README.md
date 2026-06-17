@@ -1,21 +1,3 @@
-## Table of Contents
-
-- [Paper Appendix](#paper-appendix)
-- [Highlights](#highlights)
-- [What This Project Does](#what-this-project-does)
-- [Current Status](#current-status)
-- [Requirements](#requirements)
-- [Key TPU Paths](#key-tpu-paths)
-- [Quick Start](#quick-start)
-  - [1. Prepare the repository](#1-prepare-the-repository)
-  - [2. Build and install](#2-build-and-install)
-  - [3. Run a TPU demo](#3-run-a-tpu-demo)
-- [Programming Model](#programming-model)
-- [Examples](#examples)
-- [Repository Layout](#repository-layout)
-- [Development Notes](#development-notes)
-- [Acknowledgements](#acknowledgements)
-
 ## Paper Appendix
 
 The full appendix is shown below.
@@ -25,56 +7,80 @@ The full appendix is shown below.
 ![Appendix page 3](./appendix/page-3.png)
 ![Appendix page 4](./appendix/page-4.png)
 
-## TileLang-TPU
+# Practical: Retargeting AI Kernel DSLs Beyond GPUs: An Experience Report on Refactoring TileLang to Sophgo TPUs
 
-TileLang-TPU is a TPU-oriented extension of TileLang for SOPHGO accelerators. It preserves the TileLang Python DSL while adding TPU lowering, TPU code generation, and JIT runtime integration, enabling TileLang kernels to be compiled and executed on TPU platforms.
+This repository contains the TileLang-TPU artifact for the paper above. TileLang-TPU retargets the TileLang AI kernel DSL from GPU-oriented execution to SOPHGO BM1690 TPUs, including TPU lowering, code generation, JIT host/device wrapper generation, PCIe execution, cmodel execution, and benchmark reproduction scripts.
 
-The project provides end-to-end TPU support centered on BM1690, including `target="tpu"`, `mode="pcie|cmodel"`, TPU DSL intrinsics, generated host/device glue code, and runnable TPU demos.
-## Highlights
+## Artifact Review Entry
 
-- TileLang frontend with TPU target support
-- TPU-specific DSL intrinsics such as `T.copy`, `T.gemm`, `T.reduce_sum`, `T.reduce_max`, `T.exp`, `T.rsqrt`, and `T.rope_add`
-- End-to-end JIT flow from Python kernel definition to generated TPU host/device artifacts
-- BM1690-oriented execution path with both PCIe execution and `cmodel` simulation modes
-- Operator coverage aligned with kernels commonly used by Llama and DeepSeek workloads
+Use [artifact/README.md](./artifact/README.md) as the canonical artifact guide. It contains the install commands, smoke tests, BM1690 PCIe reproduction commands, cmodel correctness-only path, expected claims, result parsers, and manifest checks.
 
-## What This Project Does
+| Reader goal | Start here |
+|---|---|
+| Run the artifact | [artifact/README.md](./artifact/README.md) |
+| Read artifact metadata | [ARTIFACT.md](./ARTIFACT.md) |
+| Check submission appendix | [Paper Appendix](#paper-appendix) |
+| Inspect benchmark matrices | [artifact/configs/](./artifact/configs/) |
+| Inspect expected claims | [artifact/expected/paper_claims.json](./artifact/expected/paper_claims.json) |
+
+Quick smoke commands:
+
+```bash
+python artifact/scripts/check_env.py --mode cmodel
+python artifact/scripts/run_smoke.py --mode cmodel
+python artifact/scripts/run_smoke.py --mode pcie
+```
+
+`mode="cmodel"` runs through the SOPHGO simulator on a CPU host and validates correctness only. Paper performance numbers require a BM1690 PCIe card.
+
+## Project Summary
+
+TileLang-TPU is a TPU-oriented extension of TileLang for SOPHGO accelerators. It preserves the TileLang Python DSL while adding TPU lowering, TPU code generation, and JIT runtime integration so TileLang kernels can compile and run on TPU platforms.
+
+The current artifact centers on BM1690 and covers:
+
+- `tilelang.compile(..., target="tpu")`
+- default PCIe mode and explicit `mode="cmodel"` simulator mode
+- TPU DSL intrinsics such as `T.copy`, `T.gemm`, `T.reduce_sum`, `T.reduce_max`, `T.exp`, `T.rsqrt`, and `T.rope_add`
+- generated host/device glue code
+- standalone operators, fused kernels, and ablation benchmarks used by the paper
+
+## What This Repository Provides
 
 TileLang-TPU is a TileLang-to-TPU compiler and runtime path for SOPHGO accelerators.
 
 - It reuses the TileLang frontend and extends it with TPU-specific lowering, codegen, and JIT support.
-- It uses the underlying TPU compilation tools also used in the PPL repository, but it is not built as a layer on top of the PPL software stack.
-- It focuses on turning TileLang programs into runnable TPU kernels, including host/device wrapper generation and execution flow integration.
+- It uses the underlying SOPHGO TPU compilation tools required by the PPL ecosystem, but the artifact evaluates TileLang-TPU as the compiler and scheduling layer.
+- It turns TileLang programs into runnable TPU kernels, including host/device wrapper generation and execution flow integration.
 
-In short, this repository is about bringing TileLang's programming model to SOPHGO TPU targets rather than repackaging PPL itself.
+## Artifact Claims
 
-## Current Status
+| Paper result | Reproduction command |
+|---|---|
+| Standalone operators | `python artifact/scripts/run_core.py --figure fig4` |
+| Fused FlashAttention and MLP W8A16 | `python artifact/scripts/run_core.py --figure fig5` |
+| Pipeline/address-allocation ablation | `python artifact/scripts/run_ablation.py` |
+| Correctness-only simulator check | `python artifact/scripts/run_smoke.py --mode cmodel` |
 
-- The current mainline JIT path focuses on BM1690.
-- `tilelang.compile(..., target="tpu")` is wired into the repository.
-- Both `mode="pcie"` and `mode="cmodel"` are present in the TPU adapter path.
-- TPU demos are available under [`tpu_demo/`](./tpu_demo/).
-- This project is under active development, and pull requests are welcome.
+The copied paper figures live in [artifact/figures/paper/](./artifact/figures/paper/). The artifact README links each covered figure to its command and expected claim.
 
 ## Requirements
 
-- Linux and Python 3
-- SOPHGO TPU toolchain environment
-- Access to BM1690 hardware or a working `cmodel` setup
+PCIe performance reproduction requires:
 
-## Key TPU Paths
+- SOPHGO BM1690 PCIe TPU card
+- Ubuntu 24.04 LTS
+- SOPHGO TPU driver v1.9.1 and matching firmware
+- SOPHGO PPL SDK v1.4.195
+- Python 3.10 or newer
+- GCC 13.3 or a compatible compiler
+- Xuantie-900 RISC-V toolchain from the SOPHGO/PPL setup
 
-- [`tilelang/engine/`](./tilelang/engine/)
-- [`tilelang/language/`](./tilelang/language/)
-- [`tilelang/jit/adapter/`](./tilelang/jit/adapter/)
-- [`src/target/`](./src/target/)
-- [`src/tl_templates/tpu/`](./src/tl_templates/tpu/)
-- [`src/transform/`](./src/transform/)
-- [`tpu_demo/`](./tpu_demo/)
+Reviewers without a physical TPU card can use cmodel for correctness-only checks if they have the SOPHGO emulator runtime.
 
-## Quick Start
+## Quick Setup
 
-### 1. Prepare the repository
+The full setup procedure is in [artifact/README.md](./artifact/README.md). The core repository preparation is:
 
 ```bash
 git submodule update --init --recursive
@@ -82,83 +88,55 @@ cp patches/tvm.patch 3rdparty/tvm/tvm.patch
 cd 3rdparty/tvm
 git apply tvm.patch
 cd ../..
-```
-
-### 2. Build and install
-
-```bash
 ./install_tpu.sh
 pip install -e . -v
 ```
 
-### 3. Run a TPU demo
+Configure the SOPHGO/PPL runtime before running TPU or cmodel paths:
 
 ```bash
-python tpu_demo/matmul/tpu_test_matmul_fp16.py
-python tpu_demo/rms_norm/rms_norm_fp16.py
-python tpu_demo/tpu_test_swiglu_fp32_cmodel.py
+export PPL_PROJECT_ROOT=/path/to/ppl
+export SRC_DIR="$PWD/src/tl_templates/tpu"
+export TPU_KERNEL_PATH="$SRC_DIR"
+export PPL_KERNEL_PATH="$SRC_DIR/libkernel.so"
+export LD_LIBRARY_PATH="/opt/tpuv7/tpuv7-current/lib:${PPL_PROJECT_ROOT}/runtime/bm1690/tpuv7-runtime-emulator/lib:${LD_LIBRARY_PATH}"
 ```
-
-For a more detailed setup guide, see [`tpu_demo/instruction.md`](./tpu_demo/instruction.md).
 
 ## Programming Model
 
-TileLang-TPU keeps the familiar TileLang workflow and switches the backend to TPU:
+TileLang-TPU keeps the TileLang workflow and switches the backend to TPU:
 
 ```python
 import tilelang
 
-kernel = tilelang.compile(
-    my_kernel,
-    out_idx=-1,
-    target="tpu",
-    mode="pcie",   # or "cmodel"
-)
+kernel = tilelang.compile(my_kernel, out_idx=-1, target="tpu")
+kernel_cmodel = tilelang.compile(my_kernel, out_idx=-1, target="tpu", mode="cmodel")
 ```
 
-Inside TPU kernels, the common building blocks are exposed as TileLang DSL intrinsics in [`tilelang/language/customize.py`](./tilelang/language/customize.py), including:
-
-- `T.copy`
-- `T.fill`
-- `T.gemm`
-- `T.reduce_sum`
-- `T.reduce_max`
-- `T.add`, `T.subtract`, `T.mul`, `T.div`
-- `T.add_C`, `T.mul_C`
-- `T.exp`, `T.sigmoid`, `T.silu`
-- `T.rsqrt`
-- `T.rope_add`
-
-## Examples
-
-The current examples mainly cover operators commonly used in Llama and DeepSeek workloads, and more operators will be added over time.
-
-Representative examples include:
-
-- Matmul
-- RMSNorm
-- RoPE
-- Reduce
-- SwiGLU
-- FlashAttention
+Omitting `mode` selects PCIe mode. Use `mode="cmodel"` only for simulator execution.
 
 ## Repository Layout
 
-- [`tilelang/`](./tilelang/): TileLang frontend and TPU-facing Python entry points
-- [`src/target/`](./src/target/): TPU codegen and runtime modules
-- [`src/tl_templates/tpu/`](./src/tl_templates/tpu/): TPU code templates and generated host/device artifacts
-- [`tilelang/jit/adapter/`](./tilelang/jit/adapter/): TPU JIT wrapper and library generation flow
-- [`tpu_demo/`](./tpu_demo/): TPU demos and bring-up scripts
+| Path | Role |
+|---|---|
+| [artifact/](./artifact/) | Artifact guide, configs, scripts, expected claims, and copied paper figures. |
+| [appendix/](./appendix/) | Required paper appendix pages rendered as PNG. |
+| [tilelang/](./tilelang/) | TileLang frontend and TPU-facing Python entry points. |
+| [src/target/](./src/target/) | TPU codegen and runtime modules. |
+| [src/tl_templates/tpu/](./src/tl_templates/tpu/) | TPU code templates and generated host/device artifacts. |
+| [tilelang/jit/adapter/](./tilelang/jit/adapter/) | TPU JIT wrapper and library generation flow. |
+| [tpu_benchmark/](./tpu_benchmark/) | Benchmark implementations for the paper figures. |
+| [tpu_demo/](./tpu_demo/) | Small TPU and cmodel diagnostics. |
 
 ## Development Notes
 
-- If you modify C++ code, rebuild the native components before rerunning demos:
+If you modify C++ code, rebuild native components before rerunning demos:
 
 ```bash
 make -j 10
 ```
 
-- Format the repository with:
+Format the repository with:
 
 ```bash
 ./format.sh
