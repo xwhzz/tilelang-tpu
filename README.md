@@ -59,8 +59,16 @@ cd ../..
 
 ### 2. Build and install
 
+#### 2.1 Build via environment variable
+
 ```bash
 ./install_tpu.sh
+export PYTHONPATH=.
+```
+
+#### 2.2 Build via pip local project
+
+```bash
 pip install -e . -v
 ```
 
