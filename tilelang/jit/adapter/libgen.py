@@ -311,7 +311,7 @@ class LibraryGenerator(object):
 
         def execute_command(cmd, task_name, timeout):
             """Execute a shell command and handle errors"""
-            # fro debug
+            # for debug
             # print(f"\n[{task_name}]")
             # print(f"Command: {cmd}")
             
