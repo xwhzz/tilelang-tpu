@@ -568,8 +568,10 @@ class CMakeBuild(build_ext):
         # Run CMake to configure the project with the given arguments.
         subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
 
-        # Build the project in "Release" mode with all available CPU cores ("-j").
-        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j"],
+        # Build the project in "Release" mode with 75% available CPU cores (f"-j{num_jobs}").
+        # Other wise, make will use all available cores and it may cause the system to be unresponsive.
+        num_jobs = int(multiprocessing.cpu_count() * 75 / 100)
+        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", f"-j{num_jobs}"],
                               cwd=build_temp)
 
 
