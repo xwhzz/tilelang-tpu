@@ -354,6 +354,29 @@ def ppl_gather(output, param, index, param_h):
     paramptr = param.access_ptr("r")
     indexptr = index.access_ptr("r")
     return T.call_extern("handle", "ppl.gather", outptr, paramptr, indexptr, param_h)
+
+
+def ppl_gather_block(output, param, index, param_h, gather_h, gather_w):
+    outptr = output.access_ptr("w")
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    return T.call_extern(
+        "handle", "ppl.gather_block", outptr, paramptr, indexptr, param_h, gather_h, gather_w
+    )
+
+
+
+def ppl_expand_scale(output, compact, expand_factor):
+    """Expand compact FP16 scale rows by repeating each row expand_factor times."""
+    outptr = output.access_ptr("w")
+    compactptr = compact.access_ptr("r")
+    return T.call_extern("handle", "ppl.expand_scale", outptr, compactptr, expand_factor)
+
+def ppl_scatter(output, param, index, param_h):
+    outptr = output.access_ptr("w")
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    return T.call_extern("handle", "ppl.scatter", outptr, paramptr, indexptr, param_h)
     
 def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     dst_data_ptr = dst_data.access_ptr("w")

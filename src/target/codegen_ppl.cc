@@ -880,6 +880,12 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << ".shape, " << dtype << ");\n";
       this->PrintIndent();
       this->stream << stride_var << ".w = 0;\n";
+      if (src1_shape[0] == 1 && src0_shape[0] != 1) {
+        this->PrintIndent();
+        this->stream << stride_var << ".c = 0;\n";
+        this->PrintIndent();
+        this->stream << stride_var << ".h = 0;\n";
+      }
       src1_stride << "&" << stride_var << ", ";
     } else if (src1_shape[1] == src0_shape[1]) {
       src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
@@ -1860,10 +1866,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
 
       auto param_h = Downcast<IntImm>(op->args[4])->value;
       auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-      std::string dtype;
-      if (dtype_ == DataType::Float(16)) dtype = "DT_FP16";
-      else if (dtype_ == DataType::Float(32)) dtype = "DT_FP32";
-      else if (dtype_ == DataType::BFloat(16)) dtype = "DT_BFP16";
+      const char* dtype = AsBDTypeStr(dtype_);
       this->PrintIndent();
       this->stream << "{\n";
       this->PrintIndent();
@@ -1873,6 +1876,177 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                    << dst << ".addr, " << param << ".addr, " << index << ".addr, "
                    << "false, (scalar_t){.u32 = 0}, &__gather_shape, " << param_h << ", "
                    << "NULL, NULL, NULL, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+    } else if (op_name == "ppl.gather_block") {
+      auto dst_var   = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+      auto param_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+      auto index_var = op->args[3].as<CallNode>()->args[1].as<VarNode>();
+
+      auto dst   = var_idmap_[dst_var];
+      if (dst.empty()) dst = this->parameter_map[dst_var->name_hint];
+      auto param = var_idmap_[param_var];
+      if (param.empty()) param = this->parameter_map[param_var->name_hint];
+      auto index = var_idmap_[index_var];
+      if (index.empty()) index = this->parameter_map[index_var->name_hint];
+
+      auto param_h = Downcast<IntImm>(op->args[4])->value;
+      auto gather_h = Downcast<IntImm>(op->args[5])->value;
+      auto gather_w = Downcast<IntImm>(op->args[6])->value;
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      const char* dtype = AsBDTypeStr(dtype_);
+      this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
+      this->stream << "dim4 __gather_block_shape = {1, 1, " << gather_h << ", " << gather_w << "};\n";
+      this->PrintIndent();
+      this->stream << "tpu_gdma_h_gather_S2S("
+                   << dst << ".addr, " << param << ".addr, " << index << ".addr, "
+                   << "false, (scalar_t){.u32 = 0}, &__gather_block_shape, " << param_h << ", "
+                   << "NULL, NULL, NULL, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+    } else if (op_name == "ppl.expand_scale") {
+      auto dst_var = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+      auto src_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+
+      auto dst = var_idmap_[dst_var];
+      if (dst.empty()) dst = this->parameter_map[dst_var->name_hint];
+      auto src = var_idmap_[src_var];
+      if (src.empty()) src = this->parameter_map[src_var->name_hint];
+
+      auto expand_factor = Downcast<IntImm>(op->args[3])->value;
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      const char* dtype = AsBDTypeStr(dtype_);
+      int dtype_bytes = TargetDTypeBytes(dtype_);
+      this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
+      this->stream << "dim4 __expand_shape = {1, 1, 1, " << src << ".shape.w};\n";
+      this->PrintIndent();
+      this->stream << "int __expand_dst_c_stride = " << dst << ".default_stride ? (" << dst << ".shape.h * " << dst << ".shape.w) : " << dst << ".stride.c;\n";
+      this->PrintIndent();
+      this->stream << "int __expand_src_c_stride = " << src << ".default_stride ? (" << src << ".shape.h * " << src << ".shape.w) : " << src << ".stride.c;\n";
+      this->PrintIndent();
+      this->stream << "for (int __scale_row = 0; __scale_row < " << src << ".shape.c; ++__scale_row) {\n";
+      this->PrintIndent();
+      this->stream << "  for (int __scale_rep = 0; __scale_rep < " << expand_factor << "; ++__scale_rep) {\n";
+      this->PrintIndent();
+      this->stream << "    global_addr_t __dst_addr = " << dst << ".addr + ((__scale_row * " << expand_factor << " + __scale_rep) * __expand_dst_c_stride) * " << dtype_bytes << ";\n";
+      this->PrintIndent();
+      this->stream << "    global_addr_t __src_addr = " << src << ".addr + (__scale_row * __expand_src_c_stride) * " << dtype_bytes << ";\n";
+      this->PrintIndent();
+      this->stream << "    tpu_gdma_cpy_S2S(__dst_addr, __src_addr, &__expand_shape, NULL, NULL, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "  }\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+    } else if (op_name == "ppl.gather_scale_expand") {
+      auto dst_var = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+      auto scale_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+      auto block_var = op->args[3].as<CallNode>()->args[1].as<VarNode>();
+
+      auto dst = var_idmap_[dst_var];
+      if (dst.empty()) dst = this->parameter_map[dst_var->name_hint];
+      auto scale = var_idmap_[scale_var];
+      if (scale.empty()) scale = this->parameter_map[scale_var->name_hint];
+      auto block = var_idmap_[block_var];
+      if (block.empty()) block = this->parameter_map[block_var->name_hint];
+
+      auto logical_blocks = Downcast<IntImm>(op->args[4])->value;
+      auto block_size = Downcast<IntImm>(op->args[5])->value;
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      ICHECK(dtype_ == DataType::Float(16))
+          << "ppl.gather_scale_expand currently supports FP16 scale only";
+
+      this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
+      this->stream << "int __scale_dst_c_stride = " << dst << ".default_stride ? ("
+                   << dst << ".shape.h * " << dst << ".shape.w) : " << dst
+                   << ".stride.c;\n";
+      this->PrintIndent();
+      this->stream << "int __scale_src_c_stride = " << scale << ".default_stride ? ("
+                   << scale << ".shape.h * " << scale << ".shape.w) : "
+                   << scale << ".stride.c;\n";
+      this->PrintIndent();
+      this->stream << "int __scale_total_rows = " << logical_blocks << " * "
+                   << block_size << ";\n";
+      this->PrintIndent();
+      this->stream << "int __scale_bytes = ((__scale_total_rows * 2 + 63) / 64) * 64;\n";
+      this->PrintIndent();
+      this->stream << "int __cache_bytes = (((" << scale << ".shape.c * "
+                   << scale << ".shape.w * 2) + 63) / 64) * 64;\n";
+      this->PrintIndent();
+      this->stream << "int __index_bytes = (((" << logical_blocks
+                   << " * 4) + 63) / 64) * 64;\n";
+      this->PrintIndent();
+      this->stream << "tpu_poll();\n";
+      this->PrintIndent();
+      this->stream << "tpu_invalidate_cache((system_addr_t)" << scale
+                   << ".addr, __cache_bytes);\n";
+      this->PrintIndent();
+      this->stream << "tpu_invalidate_cache((system_addr_t)" << block
+                   << ".addr, __index_bytes);\n";
+      this->PrintIndent();
+      this->stream << "uint16_t* __scale_dst = (uint16_t*)((system_addr_t)"
+                   << dst << ".addr);\n";
+      this->PrintIndent();
+      this->stream << "uint16_t* __scale_src = (uint16_t*)((system_addr_t)"
+                   << scale << ".addr);\n";
+      this->PrintIndent();
+      this->stream << "uint32_t* __scale_index = (uint32_t*)((system_addr_t)"
+                   << block << ".addr);\n";
+      this->PrintIndent();
+      this->stream << "for (int __logical = 0; __logical < " << logical_blocks
+                   << "; ++__logical) {\n";
+      this->PrintIndent();
+      this->stream << "  uint32_t __physical = __scale_index[__logical];\n";
+      this->PrintIndent();
+      this->stream << "  uint16_t __value = __scale_src[__physical * __scale_src_c_stride];\n";
+      this->PrintIndent();
+      this->stream << "  for (int __row = 0; __row < " << block_size
+                   << "; ++__row) {\n";
+      this->PrintIndent();
+      this->stream << "    __scale_dst[(__logical * " << block_size
+                   << " + __row) * __scale_dst_c_stride] = __value;\n";
+      this->PrintIndent();
+      this->stream << "  }\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+      this->PrintIndent();
+      this->stream << "tpu_flush_cache((system_addr_t)" << dst
+                   << ".addr, __scale_bytes);\n";
+      this->PrintIndent();
+      this->stream << "}\n";
+    } else if (op_name == "ppl.scatter") {
+      auto dst_var   = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+      auto param_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+      auto index_var = op->args[3].as<CallNode>()->args[1].as<VarNode>();
+
+      auto dst   = var_idmap_[dst_var];
+      if (dst.empty()) dst = this->parameter_map[dst_var->name_hint];
+      auto param = var_idmap_[param_var];
+      if (param.empty()) param = this->parameter_map[param_var->name_hint];
+      auto index = var_idmap_[index_var];
+      if (index.empty()) index = this->parameter_map[index_var->name_hint];
+
+      auto param_h = Downcast<IntImm>(op->args[4])->value;
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      const char* dtype = AsBDTypeStr(dtype_);
+      this->PrintIndent();
+      this->stream << "{\n";
+      this->PrintIndent();
+      this->stream << "dim4 __scatter_shape = {1, 1, " << dst << ".shape.c, " << dst << ".shape.w};\n";
+      this->PrintIndent();
+      this->stream << "tpu_gdma_h_scatter_S2S("
+                   << dst << ".addr, " << param << ".addr, " << index << ".addr, "
+                   << "false, &__scatter_shape, " << param_h << ", "
+                   << "NULL, NULL, NULL, " << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "tpu_poll();\n";
       this->PrintIndent();
       this->stream << "}\n";
     } else if (op_name == "ppl.topk") {
