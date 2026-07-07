@@ -20,12 +20,18 @@ typedef struct {
     bool default_stride;
 } __ppl_tensor_info;
 
-void llama_mlp_forward(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4, global_addr_t v5) {
-  __ppl_tensor_info v9 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v4, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v10 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v5, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v8 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v3, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v7 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v2, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v6 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v1, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
+void llama_mlp_forward(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4, global_addr_t v5, global_addr_t v6, global_addr_t v7, global_addr_t v8, global_addr_t v9, global_addr_t v10, global_addr_t v11) {
+  __ppl_tensor_info v22 = {.shape = {}, .stride = {0}, .addr = v11, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v19 = {.shape = {}, .stride = {0}, .addr = v8, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v20 = {.shape = {}, .stride = {0}, .addr = v9, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v18 = {.shape = {}, .stride = {0}, .addr = v7, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v16 = {.shape = {}, .stride = {0}, .addr = v5, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v15 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v4, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v14 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v3, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v21 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v10, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v17 = {.shape = {}, .stride = {0}, .addr = v6, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v13 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v2, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v12 = {.shape = {1 ,16, 1, 16}, .stride = {0}, .addr = v1, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 512, .unsigned_flag = 0, .default_stride = true};
   for (int bx = 0; bx < 2; ++bx) {
     for (int by = 0; by < 2; ++by) {
       __ppl_tensor_info down_out_acc = {.shape = { 1, 8, 1, 8}, .stride = {0}, .addr = 245760, .dtype = DT_FP32, .mode = 2, .align_mode = 1, .size = 4, .unsigned_flag = 0, .default_stride = false};
@@ -86,13 +92,13 @@ void llama_mlp_forward(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
           tpu_aligned_stride(&up_weight_block.stride, 0, &up_weight_block.shape, DT_BFP16);
           __ppl_tensor_info proj_part_fp32 = {.shape = { 1, 8, 1, 8}, .stride = {0}, .addr = 65536, .dtype = DT_FP32, .mode = 2, .align_mode = 1, .size = 4, .unsigned_flag = 0, .default_stride = false};
           tpu_aligned_stride(&proj_part_fp32.stride, 0, &proj_part_fp32.shape, DT_FP32);
-          __ppl_tensor_info x = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v6.addr + (((bx * 8)) * 16+((kk * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bx * 8)) * 16+((kk * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
+          __ppl_tensor_info x = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v12.addr + (((bx * 8)) * 16+((kk * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bx * 8)) * 16+((kk * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
           __ppl_tensor_info x_block_1 = {.shape = {1, 8, 1, 8}, .stride = x_block.stride, .addr = x_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = x_block.default_stride};
           tpu_gdma_cpy_S2L(x_block_1.addr, x.addr, &x_block_1.shape, (x_block_1.default_stride ? NULL : &x_block_1.stride), (x.default_stride ? NULL : &x.stride), DT_BFP16);
-          __ppl_tensor_info gate_weight = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v8.addr + (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
+          __ppl_tensor_info gate_weight = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v14.addr + (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
           __ppl_tensor_info gate_weight_block_1 = {.shape = {1, 8, 1, 8}, .stride = gate_weight_block.stride, .addr = gate_weight_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = gate_weight_block.default_stride};
           tpu_gdma_cpy_S2L(gate_weight_block_1.addr, gate_weight.addr, &gate_weight_block_1.shape, (gate_weight_block_1.default_stride ? NULL : &gate_weight_block_1.stride), (gate_weight.default_stride ? NULL : &gate_weight.stride), DT_BFP16);
-          __ppl_tensor_info up_weight = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v7.addr + (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
+          __ppl_tensor_info up_weight = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v13.addr + (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bz * 8)) * 16+((kk * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
           __ppl_tensor_info up_weight_block_1 = {.shape = {1, 8, 1, 8}, .stride = up_weight_block.stride, .addr = up_weight_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = up_weight_block.default_stride};
           tpu_gdma_cpy_S2L(up_weight_block_1.addr, up_weight.addr, &up_weight_block_1.shape, (up_weight_block_1.default_stride ? NULL : &up_weight_block_1.stride), (up_weight.default_stride ? NULL : &up_weight.stride), DT_BFP16);
           {
@@ -118,7 +124,7 @@ void llama_mlp_forward(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
         __ppl_tensor_info gated_up_fp32_1 = {.shape = {1, 8, 1, 8}, .stride = gated_up_fp32.stride, .addr = gated_up_fp32.addr, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = gated_up_fp32.default_stride};
         __ppl_tensor_info gated_up_block_1 = {.shape = {1, 8, 1, 8}, .stride = gated_up_block.stride, .addr = gated_up_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = gated_up_block.default_stride};
         tpu_bdc_cast(gated_up_block_1.addr, gated_up_fp32_1.addr, &gated_up_block_1.shape, (gated_up_block_1.default_stride ? NULL : &gated_up_block_1.stride), (gated_up_fp32_1.default_stride ? NULL : &gated_up_fp32_1.stride), DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);
-        __ppl_tensor_info down_weight = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v9.addr + (((by * 8)) * 16+((bz * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((by * 8)) * 16+((bz * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
+        __ppl_tensor_info down_weight = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v15.addr + (((by * 8)) * 16+((bz * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((by * 8)) * 16+((bz * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
         __ppl_tensor_info down_weight_block_1 = {.shape = {1, 8, 1, 8}, .stride = down_weight_block.stride, .addr = down_weight_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = down_weight_block.default_stride};
         tpu_gdma_cpy_S2L(down_weight_block_1.addr, down_weight.addr, &down_weight_block_1.shape, (down_weight_block_1.default_stride ? NULL : &down_weight_block_1.stride), (down_weight.default_stride ? NULL : &down_weight.stride), DT_BFP16);
         {
@@ -132,7 +138,7 @@ void llama_mlp_forward(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
       __ppl_tensor_info down_out_block_1 = {.shape = {1, 8, 1, 8}, .stride = down_out_block.stride, .addr = down_out_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = down_out_block.default_stride};
       tpu_bdc_cast(down_out_block_1.addr, down_out_acc_1.addr, &down_out_block_1.shape, (down_out_block_1.default_stride ? NULL : &down_out_block_1.stride), (down_out_acc_1.default_stride ? NULL : &down_out_acc_1.stride), DT_BFP16, DT_FP32, RM_HALF_TO_EVEN);
       __ppl_tensor_info down_out_block_2 = {.shape = {1, 8, 1, 8}, .stride = down_out_block.stride, .addr = down_out_block.addr, .dtype = DT_BFP16, .mode = 0, .size = 1, .offset = 0, .unsigned_flag = 0, .default_stride = down_out_block.default_stride};
-      __ppl_tensor_info output = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v10.addr + (((bx * 8)) * 16+((by * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bx * 8)) * 16+((by * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
+      __ppl_tensor_info output = {.shape = {1, 8, 1, 8}, .stride = {256, 16, 16, 1} , .addr = v21.addr + (((bx * 8)) * 16+((by * 8)) * 1 ) * 2, .dtype = DT_BFP16, .mode = 2, .size = 1, .offset = (((bx * 8)) * 16+((by * 8)) * 1 ) * 2, .unsigned_flag = 0, .default_stride = false};
       tpu_gdma_cpy_L2S(output.addr, down_out_block_2.addr, &output.shape, (output.default_stride ? NULL : &output.stride), (down_out_block_2.default_stride ? NULL : &down_out_block_2.stride), DT_BFP16);
     }
   }
@@ -144,6 +150,12 @@ typedef struct {
   global_addr_t v3;
   global_addr_t v4;
   global_addr_t v5;
+  global_addr_t v6;
+  global_addr_t v7;
+  global_addr_t v8;
+  global_addr_t v9;
+  global_addr_t v10;
+  global_addr_t v11;
 } tpu_kernel_api_main_inner_args_t;
 int main_kernel(const void * args) {
   tpu_kernel_api_main_inner_args_t *api = (tpu_kernel_api_main_inner_args_t*)args;
@@ -152,7 +164,13 @@ int main_kernel(const void * args) {
     api->v2,
     api->v3,
     api->v4,
-    api->v5);
+    api->v5,
+    api->v6,
+    api->v7,
+    api->v8,
+    api->v9,
+    api->v10,
+    api->v11);
   tpu_poll();
   return 0;
 }
