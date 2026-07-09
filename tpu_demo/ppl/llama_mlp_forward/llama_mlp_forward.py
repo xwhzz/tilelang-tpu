@@ -18,12 +18,18 @@ def get_llama_mlp_forward_kernel(
     完整的 Llama MLP Forward 算子：
     X -> gate_proj + up_proj -> SiLU -> SwiGLU -> down_proj -> output
 
-    Inputs, aligned with torch.ops.my_ops.llama_mlp_forward:
-      X:        (batch_seq, hidden_size)
+    Inputs, aligned with torch.ops.my_ops.llama_mlp_forward in soph_llama.py:
+      x:           (batch_seq, hidden_size)
       up_weight:   (intermediate_size, hidden_size)
       gate_weight: (intermediate_size, hidden_size)
       down_weight: (hidden_size, intermediate_size)
+      reserved_0:  placeholder for the 1st None argument
+      reserved_1:  placeholder for the 2nd None argument
+      reserved_2:  placeholder for the 3rd None argument
+      reserved_3:  placeholder for the 4th None argument
+      reserved_4:  placeholder for the 5th None argument
       output:      (batch_seq, hidden_size)
+      reserved_flag: placeholder for the trailing False argument
     """
     assert batch_seq % Block_bs == 0, "batch_seq must be divisible by Block_bs"
     assert hidden_size % Block_h == 0, "hidden_size must be divisible by Block_h"
@@ -34,6 +40,7 @@ def get_llama_mlp_forward_kernel(
     up_weight_shape = (intermediate_size, hidden_size)
     down_weight_shape = (hidden_size, intermediate_size)
     output_shape = (batch_seq, hidden_size)
+    reserved_shape = (1,)
 
     @T.macro
     def SiLU(
@@ -58,7 +65,13 @@ def get_llama_mlp_forward_kernel(
         up_weight: T.Tensor(up_weight_shape, dtype),
         gate_weight: T.Tensor(gate_weight_shape, dtype),
         down_weight: T.Tensor(down_weight_shape, dtype),
-        output: T.Tensor(output_shape, dtype)
+        reserved_0: T.Tensor(reserved_shape, dtype),
+        reserved_1: T.Tensor(reserved_shape, dtype),
+        reserved_2: T.Tensor(reserved_shape, dtype),
+        reserved_3: T.Tensor(reserved_shape, dtype),
+        reserved_4: T.Tensor(reserved_shape, dtype),
+        output: T.Tensor(output_shape, dtype),
+        reserved_flag: T.Tensor(reserved_shape, dtype)
     ):
         num_blocks_bs = T.ceildiv(batch_seq, Block_bs)
         num_blocks_h = T.ceildiv(hidden_size, Block_h)
