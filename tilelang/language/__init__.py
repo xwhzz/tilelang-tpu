@@ -59,7 +59,13 @@ from .customize import (
     reshape,  # noqa: F401
     view,  # noqa: F401
     ppl_gemm,  # noqa: F401
+    ppl_gemm_region,  # noqa: F401
     ppl_copy,  # noqa: F401
+    ppl_copy_region,  # noqa: F401
+    ppl_npu_bcast,  # noqa: F401
+    ppl_workitem_index,  # noqa: F401
+    ppl_sync_all,  # noqa: F401
+    ppl_dequant_fp8_block_scale,  # noqa: F401
     ppl_fill,  # noqa: F401
     ppl_clear,  # noqa: F401
     ppl_add,  # noqa: F401

@@ -412,6 +412,26 @@ private:
     return op->op.same_as(builtin::tvm_access_ptr());
   }
 
+  bool IsTLRegionCall(const CallNode *op) const {
+    auto *op_node = op->op.as<OpNode>();
+    return op_node && op_node->name == "tl.region";
+  }
+
+  BufferAccessKind AccessKindFromMask(int64_t mask_value) const {
+    bool read = (mask_value & 1) != 0;
+    bool write = (mask_value & 2) != 0;
+    if (read && write) {
+      return BufferAccessKind::kReadWrite;
+    }
+    if (read) {
+      return BufferAccessKind::kRead;
+    }
+    if (write) {
+      return BufferAccessKind::kWrite;
+    }
+    return BufferAccessKind::kConservative;
+  }
+
   const BufferNode *BufferFromAccessPtr(const CallNode *op) const {
     if (!IsAccessPtrCall(op) || op->args.size() < 2) {
       return nullptr;
@@ -435,18 +455,7 @@ private:
     if (!mask) {
       return BufferAccessKind::kConservative;
     }
-    bool read = (mask->value & 1) != 0;
-    bool write = (mask->value & 2) != 0;
-    if (read && write) {
-      return BufferAccessKind::kReadWrite;
-    }
-    if (read) {
-      return BufferAccessKind::kRead;
-    }
-    if (write) {
-      return BufferAccessKind::kWrite;
-    }
-    return BufferAccessKind::kConservative;
+    return AccessKindFromMask(mask->value);
   }
 
   void VisitAccessPtrCall(const CallNode *op, BufferAccessKind access_kind) {
@@ -458,6 +467,35 @@ private:
       if (i == 1 || i == 4) {
         continue;
       }
+      VisitExpr(op->args[i]);
+    }
+  }
+
+  BufferAccessKind AccessKindFromTLRegion(const CallNode *op) const {
+    if (op->args.size() < 2) {
+      return BufferAccessKind::kConservative;
+    }
+    auto *mask = op->args[1].as<IntImmNode>();
+    if (!mask) {
+      return BufferAccessKind::kConservative;
+    }
+    return AccessKindFromMask(mask->value);
+  }
+
+  void VisitTLRegionCall(const CallNode *op, BufferAccessKind access_kind) {
+    if (op->args.empty()) {
+      return;
+    }
+    auto *load = op->args[0].as<BufferLoadNode>();
+    if (load) {
+      MarkUse(load->buffer.get(), access_kind);
+      for (const auto &index : load->indices) {
+        VisitExpr(index);
+      }
+    } else {
+      VisitExpr(op->args[0]);
+    }
+    for (size_t i = 2; i < op->args.size(); ++i) {
       VisitExpr(op->args[i]);
     }
   }
@@ -545,6 +583,10 @@ private:
         VisitAccessPtrCall(op, operand_access_kind_);
         return;
       }
+      if (IsTLRegionCall(op)) {
+        VisitTLRegionCall(op, operand_access_kind_);
+        return;
+      }
       StmtExprVisitor::VisitExpr_(op);
       return;
     }
@@ -553,6 +595,10 @@ private:
     }
     if (IsAccessPtrCall(op)) {
       VisitAccessPtrCall(op, AccessKindFromAccessPtr(op));
+      return;
+    }
+    if (IsTLRegionCall(op)) {
+      VisitTLRegionCall(op, AccessKindFromTLRegion(op));
       return;
     }
     OpScope scope(this);

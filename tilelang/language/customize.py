@@ -133,6 +133,80 @@ def ppl_gemm(A, B, C, transpose_A=False, transpose_B=False):
     return T.call_extern("handle", "ppl.gemm", Aptr, Bptr, Cptr, transpose_A, transpose_B, M, N, K)
 
 
+
+
+def ppl_gemm_region(A, B, C, transpose_A=False, transpose_B=False,
+                    A_extent=None, B_extent=None, C_extent=None,
+                    accumulate=False):
+    """Launch TPU GEMM on explicit TileLang regions/views.
+
+    This mirrors :func:`ppl_gemm`, but accepts BufferRegion/BufferLoad inputs so
+    local subviews can be lowered to Sophgo PPL-style tensor descriptors with
+    address offsets.  Dynamic slices such as ``buf[hbi:hbi + 1, :]`` may not
+    carry a static extent through TVM, so callers can provide ``*_extent`` to
+    keep the generated region shape explicit instead of copying through a
+    temporary full buffer.
+
+    Set ``accumulate=True`` for chunked-K patterns where GEMM output should be
+    accumulated into ``C``. On TPU this lowers to the Sophgo-style
+    ``*_with_bias`` GEMM form and avoids an extra temporary tile plus
+    ``ppl_add``.
+    """
+
+    def _shape(data, explicit=None):
+        if explicit is not None:
+            return list(explicit)
+        if isinstance(data, Buffer):
+            return list(data.shape)
+        if isinstance(data, BufferRegion):
+            return [x.extent for x in data.region]
+        if isinstance(data, BufferLoad):
+            extents = []
+            for dim, idx in zip(data.buffer.shape, data.indices):
+                lanes = getattr(idx, "lanes", None)
+                if lanes is not None:
+                    lanes_v = getattr(lanes, "value", lanes if isinstance(lanes, int) else None)
+                    if lanes_v is None:
+                        raise TypeError("ppl_gemm_region BufferLoad ramp has dynamic lanes")
+                    extents.append(int(lanes_v))
+                    continue
+                dim_v = getattr(dim, "value", dim if isinstance(dim, int) else None)
+                idx_v = getattr(idx, "value", idx if isinstance(idx, int) else None)
+                if dim_v is None or idx_v is None:
+                    raise TypeError("ppl_gemm_region BufferLoad needs a deducible shape; pass *_extent")
+                extents.append(int(dim_v) - int(idx_v))
+            return extents
+        raise TypeError(type(data))
+
+    def _to_region(data, access_type, shape):
+        if isinstance(data, Buffer):
+            return buffer_to_tile_region(data, access_type)
+        if isinstance(data, BufferRegion):
+            return buffer_region_to_tile_region(data, access_type)
+        return buffer_load_to_tile_region(data, access_type, shape)
+
+    a_shape = _shape(A, A_extent)
+    b_shape = _shape(B, B_extent)
+    c_shape = _shape(C, C_extent)
+    M = c_shape[-2]
+    N = c_shape[-1]
+    K = a_shape[-2] if transpose_A else a_shape[-1]
+    K_B = b_shape[-1] if transpose_B else b_shape[-2]
+    assert K == K_B, "gemm K shape check failed"
+    return T.call_extern(
+        "handle",
+        "ppl.gemm_acc_region" if accumulate else "ppl.gemm_region",
+        _to_region(A, "r", a_shape),
+        _to_region(B, "r", b_shape),
+        _to_region(C, "rw", c_shape),
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+    )
+
+
 def ppl_copy(
     src,
     dst,
@@ -205,6 +279,83 @@ def ppl_copy(
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
     return T.call_extern("handle", "ppl.copy", src, dst)
+
+
+
+
+def ppl_copy_region(src, dst, extent):
+    """Copy a region with an explicit extent.
+
+    This is useful for Sophgo PPL-style views such as dynamic global offsets
+    copied into local subviews, where the generic ``ppl_copy`` frontend cannot
+    infer the region extent from BufferLoad operands.  The backend still sees
+    the normal ``ppl.copy`` extern; only the frontend extent construction is
+    explicit.
+    """
+
+    def _to_region(data, access_type):
+        if isinstance(data, Buffer):
+            return buffer_to_tile_region(data, access_type)
+        elif isinstance(data, BufferRegion):
+            return buffer_region_to_tile_region(data, access_type)
+        else:
+            return buffer_load_to_tile_region(data, access_type, extent)
+
+    return T.call_extern("handle", "ppl.copy", _to_region(src, "r"), _to_region(dst, "w"))
+
+def ppl_npu_bcast(src, dst):
+    """Broadcast a compact local tile across the TPU NPU lane dimension.
+
+    This mirrors the scale staging pattern used by Sophgo PPL fp8 MLA before
+    block-scale dequant. Both inputs are expected to be local/shared tiles.
+    """
+
+    def _to_region(data, access_type):
+        if isinstance(data, Buffer):
+            return buffer_to_tile_region(data, access_type)
+        elif isinstance(data, BufferRegion):
+            return buffer_region_to_tile_region(data, access_type)
+        else:
+            extent = [1] * len(data.indices)
+            return buffer_load_to_tile_region(data, access_type, extent)
+
+    return T.call_extern("handle", "ppl.npu_bcast", _to_region(src, "r"), _to_region(dst, "w"))
+
+
+def ppl_workitem_index():
+    """Return the current TPU workitem/core index."""
+    return T.call_extern("int32", "ppl.workitem_index")
+
+
+def ppl_sync_all():
+    """Synchronize all workitems participating in the current TPU launch."""
+    return T.call_extern("handle", "ppl.sync_all")
+
+
+def ppl_dequant_fp8_block_scale(src_fp8, scale_bcast, dst):
+    """Cast an fp8 local tile to bf16/fp16 and apply a local block scale view.
+
+    ``scale_bcast`` should be prepared with :func:`ppl_npu_bcast`. The codegen
+    uses zero stride on the lane and inner-column dimensions, matching the
+    compact block-scale multiply pattern emitted by Sophgo PPL.
+    """
+
+    def _to_region(data, access_type):
+        if isinstance(data, Buffer):
+            return buffer_to_tile_region(data, access_type)
+        elif isinstance(data, BufferRegion):
+            return buffer_region_to_tile_region(data, access_type)
+        else:
+            extent = [1] * len(data.indices)
+            return buffer_load_to_tile_region(data, access_type, extent)
+
+    return T.call_extern(
+        "handle",
+        "ppl.dequant_fp8_block_scale",
+        _to_region(src_fp8, "r"),
+        _to_region(scale_bcast, "r"),
+        _to_region(dst, "w"),
+    )
 
 
 def ppl_fill(buffer, value):
@@ -310,7 +461,6 @@ def ppl_mul(out, inp1, inp2):
     return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
 
-@T.macro
 def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
     """Compute `exp(out)` in place.
 
@@ -336,7 +486,9 @@ def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32
     work1ptr = work1.access_ptr("rw")
     coeffptr = coeff.access_ptr("rw")
     tableptr = table.access_ptr("rw")
-    T.call_extern("handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr)
+    return T.call_extern(
+        "handle", "ppl.exp", buffer, work0ptr, work1ptr, coeffptr, tableptr
+    )
 
 
 @T.macro
@@ -481,7 +633,7 @@ def ppl_reduce_sum_safe(inp, out, dim):
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
     with T.block("reduce_sum"):
-        tmp_shape = [inp.shape[0], 32]  # EU数量为32
+        tmp_shape = [inp.shape[0], 32]  # EU count is 32
         tmp_buffer_sum = T.alloc_shared(tmp_shape, inp.dtype)
         tmp_ptr = tmp_buffer_sum.access_ptr("rw")
         eu_num = T.int32(32)
@@ -526,11 +678,11 @@ def ppl_reduce_max_safe(inp, out, dim, clear=True):
     outptr = out.access_ptr("rw")
     if clear:
         T.call_extern("handle", "ppl.fill", outptr, T.float16(float('-inf')))
-    # 仅支持2D张量和dim=1
+    # Only 2D tensors and dim=1 are supported
     # assert len(shape) == 2, "Only 2D tensors are supported"
-    # 如果没有提供临时缓冲区，则创建一个
-    # 创建一个临时缓冲区用于中间结果
-    # 注意：这里的32是EU数量，可能需要根据实际情况调整
+    # Create temporary workspace when no external buffer is supplied
+    # Temporary buffer for intermediate reduction values
+    # 32 is the current EU count used by this lowering
     with T.block("reduce_max"):
         tmp_shape = [inp.shape[0], 32]  # EU数量为32
         tmp_buffer_max = T.alloc_shared(tmp_shape, inp.dtype)
