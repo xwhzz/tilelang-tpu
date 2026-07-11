@@ -6,7 +6,7 @@ import os
 import json
 import shutil
 from hashlib import sha256
-from typing import Callable, List, Literal, Union, Optional
+from typing import Callable, List, Literal, Union, Optional, Any, Dict
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
@@ -108,6 +108,9 @@ class KernelCache:
         verbose: bool = False,
         pass_configs: dict = None,
         mode: Literal["pcie", "cmodel"] = "pcie",
+        tpu_core_parallel: Optional[Union[bool, Dict[str, Any]]] = None,
+        tpu_device_id: Optional[int] = None,
+        tpu_runtime_root: Optional[str] = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -132,6 +135,9 @@ class KernelCache:
                 verbose=verbose,
                 pass_configs=pass_configs,
                 mode=mode,
+                tpu_core_parallel=tpu_core_parallel,
+                tpu_device_id=tpu_device_id,
+                tpu_runtime_root=tpu_runtime_root,
             )
 
         # key = self._generate_key(
@@ -163,7 +169,10 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
-            mode=mode
+            mode=mode,
+            tpu_core_parallel=tpu_core_parallel,
+            tpu_device_id=tpu_device_id,
+            tpu_runtime_root=tpu_runtime_root,
         )
         # if execution_backend == "dlpack":
         #     self.logger.warning("DLPack backend does not support cache saving to disk.")
