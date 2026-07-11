@@ -103,24 +103,7 @@ std::string CodeGenTileLangPPL::Finish() {
               << "    int offset;\n"
               << "    bool unsigned_flag;\n"
               << "    bool default_stride;\n"
-              << "} __ppl_tensor_info;\n\n"
-              << "static inline int __ppl_div_up_i32(int x, int y) { return (x + y - 1) / y; }\n"
-              << "static inline int __ppl_align_up_i32(int x, int y) { return __ppl_div_up_i32(x, y) * y; }\n"
-              << "static inline int __ppl_dtype_bytes_for_stride(data_type_t dtype) {\n"
-              << "  if (dtype == DT_FP32 || dtype == DT_TF32 || dtype == DT_INT32 || dtype == DT_UINT32) return 4;\n"
-              << "  if (dtype == DT_FP16 || dtype == DT_BFP16 || dtype == DT_INT16 || dtype == DT_UINT16) return 2;\n"
-              << "  return 1;\n"
-              << "}\n"
-              << "static inline void __ppl_static_aligned_stride(dim4 *stride, const dim4 *shape, data_type_t dtype) {\n"
-              << "  int dtype_bytes = __ppl_dtype_bytes_for_stride(dtype);\n"
-              << "  int align_elems = 64 / dtype_bytes;\n"
-              << "  int hw_stride = shape->w;\n"
-              << "  int c_stride = __ppl_align_up_i32(shape->h * shape->w, align_elems);\n"
-              << "  stride->w = 1;\n"
-              << "  stride->h = hw_stride;\n"
-              << "  stride->c = c_stride;\n"
-              << "  stride->n = __ppl_div_up_i32(shape->c, 64) * c_stride;\n"
-              << "}\n\n";
+              << "} __ppl_tensor_info;\n\n";
   return CodeGenC::Finish();
   }
 
@@ -890,51 +873,17 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                                const std::string &src0, const std::string &src1,
                                const std::string &dtype) -> std::stringstream {
     std::stringstream src1_stride;
-    bool need_broadcast_stride = src1_shape.size() != src0_shape.size();
-    size_t common_rank = std::min(src0_shape.size(), src1_shape.size());
-    for (size_t i = 0; i < common_rank; ++i) {
-      if (src1_shape[i] == 1 && src0_shape[i] != 1) {
-        need_broadcast_stride = true;
-      } else if (src1_shape[i] != src0_shape[i]) {
-        need_broadcast_stride = true;
-      }
-    }
-    if (need_broadcast_stride) {
+    if (src1_shape[1] == 1 && src0_shape[1] != 1) {
       std::string stride_var = name_supply_->FreshName(src1 + "_stride");
       this->PrintIndent();
       this->stream << "dim4 " << stride_var << ";\n";
       this->PrintIndent();
-      this->stream << "__ppl_static_aligned_stride(&" << stride_var << ", &" << src1
+      this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &" << src1
                    << ".shape, " << dtype << ");\n";
-      bool src1_is_scalar = true;
-      for (auto dim : src1_shape) {
-        if (dim != 1) {
-          src1_is_scalar = false;
-          break;
-        }
-      }
-      if (src1_is_scalar) {
-        this->PrintIndent();
-        this->stream << stride_var << ".n = 0;\n";
-        this->PrintIndent();
-        this->stream << stride_var << ".c = 0;\n";
-        this->PrintIndent();
-        this->stream << stride_var << ".h = 0;\n";
-        this->PrintIndent();
-        this->stream << stride_var << ".w = 0;\n";
-      }
-      if (src1_shape.size() >= 1 && src0_shape.size() >= 1 &&
-          src1_shape[0] == 1 && src0_shape[0] != 1) {
-        this->PrintIndent();
-        this->stream << stride_var << ".c = 0;\n";
-      }
-      if (src1_shape.size() >= 2 && src0_shape.size() >= 2 &&
-          src1_shape[1] == 1 && src0_shape[1] != 1) {
-        this->PrintIndent();
-        this->stream << stride_var << ".w = 0;\n";
-      }
+      this->PrintIndent();
+      this->stream << stride_var << ".w = 0;\n";
       src1_stride << "&" << stride_var << ", ";
-    } else {
+    } else if (src1_shape[1] == src0_shape[1]) {
       src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
                   << ".stride), ";
     }
@@ -1009,15 +958,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
   };
   std::vector<std::string> inst;
-  std::function<std::string(const PrimExpr&)> print_index_expr = [&](const PrimExpr &expr) -> std::string {
-    if (const FloorDivNode *div = expr.as<FloorDivNode>()) {
-      return "(" + print_index_expr(div->a) + " / " + print_index_expr(div->b) + ")";
-    }
-    if (const FloorModNode *mod = expr.as<FloorModNode>()) {
-      return "(" + print_index_expr(mod->a) + " % " + print_index_expr(mod->b) + ")";
-    }
-    return PrintExpr(expr);
-  };
   if (op->op.same_as(builtin::call_extern())) {
     std::string op_name = Downcast<StringImm>(op->args[0])->value;
     if (op_name == "ppl.workitem_index") {
@@ -1053,10 +993,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto process_simple_region = [&, this](const tl::RegionOp &region) -> SimpleRegionInfo {
         auto buffer = region.GetBuffer();
         auto ranges = region.GetRanges();
-        auto id = var_idmap_[buffer->data.get()];
-        if (id.empty()) {
-          id = this->parameter_map[buffer->name];
-        }
         ICHECK(ranges.size() == 2 || ranges.size() == 4)
             << op_name << " only supports 2D/4D regions for now";
         auto range_extent = [&](const Range &sr) -> int {
@@ -1099,9 +1035,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
             const PrimExpr &e = sr->min;
             std::string idx_str;
             if (const RampNode *ramp = e.as<RampNode>()) {
-              idx_str = print_index_expr(ramp->base);
+              idx_str = PrintExpr(ramp->base);
             } else {
-              idx_str = print_index_expr(e);
+              idx_str = PrintExpr(e);
             }
             if (stride_idx[i] == 1) {
               // Align with Sophgo MLA PPL local C-dim view semantics: local C
@@ -1119,31 +1055,6 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          parent_var + ".addr + " + min_expr + ", .dtype = " + dtype +
                          ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
                          ".unsigned_flag = 0, .default_stride = false};\n");
-        } else if (buffer.scope() == "global") {
-          auto strides = buffer_stride[buffer->name];
-          std::vector<int> stride_idx = ranges.size() == 4 ? std::vector<int>{0, 1, 2, 3}
-                                                           : std::vector<int>{1, 3};
-          std::string min_expr;
-          for (int i = 0; i < static_cast<int>(ranges.size()); ++i) {
-            auto sr = ranges[i];
-            const PrimExpr &e = sr->min;
-            std::string idx_str;
-            if (const RampNode *ramp = e.as<RampNode>()) {
-              idx_str = print_index_expr(ramp->base);
-            } else {
-              idx_str = print_index_expr(e);
-            }
-            min_expr += "(" + idx_str + ") * " + std::to_string(strides[stride_idx[i]]) + "+";
-          }
-          min_expr[min_expr.size() - 1] = ' ';
-          min_expr = "(" + min_expr + ") * " + std::to_string(bytes);
-        inst.push_back("__ppl_tensor_info " + new_var + " = {.shape = {1, " +
-                         std::to_string(rows) + ", 1, " + std::to_string(cols) +
-                         "}, .stride = {" + std::to_string(rows * cols) + ", " +
-                         std::to_string(cols) + ", " + std::to_string(cols) +
-                         ", 1}, .addr = " + id + ".addr + " + min_expr +
-                         ", .dtype = " + dtype + ", .mode = 2, .size = 1, .offset = " +
-                         min_expr + ", .unsigned_flag = 0, .default_stride = false};\n");
         } else {
           LOG(FATAL) << "Unsupported " << op_name << " scope: " << buffer.scope();
         }
@@ -1211,7 +1122,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
             << "ppl.dequant_fp8_block_scale expects scalar scale or per-row compact scale";
         std::string scale_stride = name_supply_->FreshName(scale_info.var + "_block_stride");
         inst.push_back("dim4 " + scale_stride + ";\n");
-        inst.push_back("__ppl_static_aligned_stride(&" + scale_stride + ", &" + scale_info.var +
+        inst.push_back("tpu_aligned_stride(&" + scale_stride + ", 0, &" + scale_info.var +
                        ".shape, " + scale_info.dtype + ");\n");
         if (scale_info.rows == 1 && scale_info.cols == 1) {
           inst.push_back(scale_stride + ".c = 0;\n");
@@ -1260,9 +1171,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
               arith::ProofStrength::kSymbolicBound);
           bool upper_bad = analyzer.CanProve(
               upper > shape_dim, arith::ProofStrength::kSymbolicBound);
-          // Keep rejecting regions that are provably invalid. Runtime scalar
-          // offsets, such as Sophgo MLA seqlen-derived cache slots, cannot be
-          // proven here and are validated by the host wrapper before launch.
+          // Dynamic offsets such as the MLA cache slot are validated by
+          // the host wrapper before launch.
           ICHECK(!lower_bad && !upper_bad)
               << "ppl.copy " << operand_name << " region is out of bounds "
               << "for buffer " << buffer->name << " at dim "
@@ -1310,16 +1220,16 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
             const PrimExpr &e = sr->min;
             std::string idx_str;
             if (const RampNode *ramp = e.as<RampNode>()) {
-              idx_str = print_index_expr(ramp->base);
+              idx_str = PrintExpr(ramp->base);
             } else {
-              idx_str = print_index_expr(e);
+              idx_str = PrintExpr(e);
             }
             min_expr += "(" + idx_str + ") * " +
                         std::to_string(strides[stride_idx[i]]) + "+";
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-        inst.push_back("__ppl_tensor_info " + new_src_var +
+          inst.push_back("__ppl_tensor_info " + new_src_var +
                          " = {.shape = " + src_shape +
                          ", .stride = " + src_strides + ", .addr = " + src_id +
                          ".addr + " + min_expr + ", .dtype = " + dtype +
@@ -1346,7 +1256,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           min_expr[min_expr.size() - 1] = ' ';
           min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
-        inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
+          inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
                          src_shape + ", .stride = " + parent_var +
                          ".stride, .addr = " + parent_var +
                          ".addr + " + min_expr + ", .dtype = " + dtype +
@@ -1421,7 +1331,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                       ".default_stride ? NULL : &" + src_var_id +
                       ".stride), " + dst_dtype + ", " + src_dtype + ", " +
                       "RM_HALF_TO_EVEN" + ");\n";
-        inst.push_back(ppl_inst);
+          inst.push_back(ppl_inst);
           return;
         }
 
@@ -1440,7 +1350,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                     ".default_stride ? NULL : &" + dst_var_id + ".stride), " +
                     "(" + src_var_id + ".default_stride ? NULL : &" +
                     src_var_id + ".stride), " + src_dtype + ");\n";
-        inst.push_back(ppl_inst);
+          inst.push_back(ppl_inst);
       };
 
       auto emit_copy_for_ranges = [&](const Array<Range> &src_ranges,
@@ -1567,9 +1477,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           const PrimExpr &e = sr->min;
           std::string idx_str;
           if (const RampNode *ramp = e.as<RampNode>()) {
-            idx_str = print_index_expr(ramp->base);
+            idx_str = PrintExpr(ramp->base);
           } else {
-            idx_str = print_index_expr(e);
+            idx_str = PrintExpr(e);
           }
           if (stride_idx[i] == 1) {
             // Align with Sophgo MLA PPL local view semantics: C-dim local
@@ -1648,9 +1558,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto b_dtype = op->args[2].as<CallNode>()->args[0].as<CallNode>()->dtype;
       auto c_dtype = op->args[3].as<CallNode>()->args[0].as<CallNode>()->dtype;
       const char* left_right_dtype = AsBDTypeStr(a_dtype);
-      // Non-transpose path: accumulation requires FP32
+      // 非转置路径：累加需要数据类型为FP32
       const char* output_dtype_accum = "DT_FP32"; 
-      // Transpose path: use matching precision when C matches A/B, otherwise use FP32
+      // 转置路径：若C与A/B同精度则可用同精度，否则用FP32
       const char* output_dtype_trans =
           (std::string(AsBDTypeStr(c_dtype)) == left_right_dtype) ? left_right_dtype : "DT_FP32";
 
@@ -2220,7 +2130,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       this->stream << "dim4 half_stride;\n";
       this->PrintIndent();
-      this->stream << "__ppl_static_aligned_stride(&half_stride, &" << dst << ".shape, " << dtype << ");\n";
+      this->stream << "tpu_aligned_stride(&half_stride, 0, &" << dst << ".shape, " << dtype << ");\n";
       this->PrintIndent();
       this->stream << "half_stride.w *= 2;\n";
       this->PrintIndent();
@@ -2600,8 +2510,8 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     }
   };
 
-  // Don't use name hint for tensor arguments, but can remove later.
-  auto allocate_buffer_name = [&, this](const Var &v, int index, int length) {
+  // don't use name hint, but can remove later.
+  auto allocate_name = [&, this](const Var &v, int index, int length) {
     auto v_node = v.get();
     std::string vid = "v" + std::to_string(index + 1);
     std::string rid = "v" + std::to_string(index + 1 + length);
@@ -2642,7 +2552,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     std::string vid = "v" + std::to_string(i + 1);
     std::string param_type;
     if (buffer_map.count(v)) {
-      vid = allocate_buffer_name(v, i, param_len);
+      vid = allocate_name(v, i, param_len);
       param_type = restrict_keyword_;
     } else {
       // Sophgo kernel APIs carry runtime values such as seqlen/slot inline in

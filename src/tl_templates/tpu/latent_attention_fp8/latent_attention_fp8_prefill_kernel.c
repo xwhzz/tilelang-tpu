@@ -1,12 +1,5 @@
 #include "ppl_helper.h"
 #ifndef __PPL_HELPER__
-static data_type_t __ppl_get_dtype(int type) {
-  data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  DT_BFP16,
-    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,
-    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,
-    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};
-  return __dtype[type];
-}
 #endif  // __PPL_HELPER__
 
 typedef struct {
@@ -22,41 +15,23 @@ typedef struct {
     bool default_stride;
 } __ppl_tensor_info;
 
-static inline int __ppl_div_up_i32(int x, int y) { return (x + y - 1) / y; }
-static inline int __ppl_align_up_i32(int x, int y) { return __ppl_div_up_i32(x, y) * y; }
-static inline int __ppl_dtype_bytes_for_stride(data_type_t dtype) {
-  if (dtype == DT_FP32 || dtype == DT_TF32 || dtype == DT_INT32 || dtype == DT_UINT32) return 4;
-  if (dtype == DT_FP16 || dtype == DT_BFP16 || dtype == DT_INT16 || dtype == DT_UINT16) return 2;
-  return 1;
-}
-static inline void __ppl_static_aligned_stride(dim4 *stride, const dim4 *shape, data_type_t dtype) {
-  int dtype_bytes = __ppl_dtype_bytes_for_stride(dtype);
-  int align_elems = 64 / dtype_bytes;
-  int hw_stride = shape->w;
-  int c_stride = __ppl_align_up_i32(shape->h * shape->w, align_elems);
-  stride->w = 1;
-  stride->h = hw_stride;
-  stride->c = c_stride;
-  stride->n = __ppl_div_up_i32(shape->c, 64) * c_stride;
-}
-
-void main_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4, global_addr_t v5, global_addr_t v6, global_addr_t v7, global_addr_t v8, global_addr_t v9, global_addr_t v10, global_addr_t v11, global_addr_t v12, global_addr_t v13, global_addr_t v14, global_addr_t v15, global_addr_t v16, global_addr_t v17) {
+void latent_attention_fp8_prefill_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, global_addr_t v4, global_addr_t v5, global_addr_t v6, global_addr_t v7, global_addr_t v8, global_addr_t v9, global_addr_t v10, global_addr_t v11, global_addr_t v12, global_addr_t v13, global_addr_t v14, global_addr_t v15, global_addr_t v16, global_addr_t v17) {
   __ppl_tensor_info v34 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v17, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v32 = {.shape = {1, 8, 1, 128} , .stride = {0}, .addr = v15, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 2048, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v31 = {.shape = {1, 8, 1, 192} , .stride = {0}, .addr = v14, .dtype = DT_FP32, .mode = 2, .align_mode = 0, .size = 6144, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v18 = {.shape = {1, 8, 1, 1536} , .stride = {0}, .addr = v1, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v19 = {.shape = {1, 192, 1, 512} , .stride = {0}, .addr = v2, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 196608, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v24 = {.shape = {1, 256, 1, 512} , .stride = {0}, .addr = v7, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 262144, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v21 = {.shape = {1, 192, 1, 1536} , .stride = {0}, .addr = v4, .dtype = DT_FP8E4M3, .mode = 2, .align_mode = 0, .size = 294912, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v33 = {.shape = {1, 192, 1, 512} , .stride = {0}, .addr = v16, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 196608, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v22 = {.shape = {1, 256, 1, 512} , .stride = {0}, .addr = v5, .dtype = DT_FP8E4M3, .mode = 2, .align_mode = 0, .size = 131072, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v20 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v3, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v23 = {.shape = {1, 192, 1, 1536} , .stride = {0}, .addr = v6, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 589824, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v27 = {.shape = {1, 8, 1, 64} , .stride = {0}, .addr = v10, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 1024, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v28 = {.shape = {1, 8, 1, 64} , .stride = {0}, .addr = v11, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 1024, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v25 = {.shape = {1, 192, 1, 512} , .stride = {0}, .addr = v8, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 196608, .unsigned_flag = 0, .default_stride = true};
-  __ppl_tensor_info v30 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v13, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v19 = {.shape = {1, 192, 1, 512} , .stride = {0}, .addr = v2, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 196608, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v21 = {.shape = {1, 192, 1, 1536} , .stride = {0}, .addr = v4, .dtype = DT_FP8E4M3, .mode = 2, .align_mode = 0, .size = 294912, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v26 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v9, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v27 = {.shape = {1, 8, 1, 64} , .stride = {0}, .addr = v10, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 1024, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v31 = {.shape = {1, 8, 1, 192} , .stride = {0}, .addr = v14, .dtype = DT_FP32, .mode = 2, .align_mode = 0, .size = 6144, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v23 = {.shape = {1, 192, 1, 1536} , .stride = {0}, .addr = v6, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 589824, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v20 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v3, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v22 = {.shape = {1, 256, 1, 512} , .stride = {0}, .addr = v5, .dtype = DT_FP8E4M3, .mode = 2, .align_mode = 0, .size = 131072, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v30 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v13, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v24 = {.shape = {1, 256, 1, 512} , .stride = {0}, .addr = v7, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 262144, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v25 = {.shape = {1, 192, 1, 512} , .stride = {0}, .addr = v8, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 196608, .unsigned_flag = 0, .default_stride = true};
+  __ppl_tensor_info v28 = {.shape = {1, 8, 1, 64} , .stride = {0}, .addr = v11, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 1024, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info v29 = {.shape = {1, 192, 1, 64} , .stride = {0}, .addr = v12, .dtype = DT_BFP16, .mode = 2, .align_mode = 0, .size = 24576, .unsigned_flag = 0, .default_stride = true};
   __ppl_tensor_info q_nope_acc = {.shape = { 1, 8, 1, 128}, .stride = {0}, .addr = 256, .dtype = DT_FP32, .mode = 2, .align_mode = 1, .size = 512, .unsigned_flag = 0, .default_stride = false};
   tpu_aligned_stride(&q_nope_acc.stride, 0, &q_nope_acc.shape, DT_FP32);
@@ -185,7 +160,7 @@ void main_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
   tpu_bdc_fp_mul( q_rope_neg_sin.addr, q_rope_neg.addr, sin_q_shared.addr, &q_rope_neg_sin.shape, (q_rope_neg_sin.default_stride ? NULL : &q_rope_neg_sin.stride), (q_rope_neg.default_stride ? NULL : &q_rope_neg.stride), (sin_q_shared.default_stride ? NULL : &sin_q_shared.stride), DT_BFP16);
   {
   dim4 half_stride;
-  __ppl_static_aligned_stride(&half_stride, &q_rope.shape, DT_BFP16);
+  tpu_aligned_stride(&half_stride, 0, &q_rope.shape, DT_BFP16);
   half_stride.w *= 2;
   dim4 half_shape = {.n = q_rope.shape.n, .c = q_rope.shape.c, .h = q_rope.shape.h, .w = q_rope.shape.w};
   half_shape.w /= 2;
@@ -278,7 +253,7 @@ void main_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
     tpu_bdc_fp_mul( pe_rope_neg_sin.addr, pe_rope_neg.addr, sin_all_tile.addr, &pe_rope_neg_sin.shape, (pe_rope_neg_sin.default_stride ? NULL : &pe_rope_neg_sin.stride), (pe_rope_neg.default_stride ? NULL : &pe_rope_neg.stride), (sin_all_tile.default_stride ? NULL : &sin_all_tile.stride), DT_BFP16);
     {
     dim4 half_stride;
-    __ppl_static_aligned_stride(&half_stride, &pe_rope_tile.shape, DT_BFP16);
+    tpu_aligned_stride(&half_stride, 0, &pe_rope_tile.shape, DT_BFP16);
     half_stride.w *= 2;
     dim4 half_shape = {.n = pe_rope_tile.shape.n, .c = pe_rope_tile.shape.c, .h = pe_rope_tile.shape.h, .w = pe_rope_tile.shape.w};
     half_shape.w /= 2;
@@ -418,7 +393,7 @@ void main_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
     tpu_bdc_load_fp32_exp_table(table.addr);
     tpu_bdc_fp32_exp(scores_scale.addr, scores_scale.addr, work_scale0.addr, work_scale1.addr, coeff.addr, table.addr, &scores_scale.shape);
     dim4 scores_max_stride;
-    __ppl_static_aligned_stride(&scores_max_stride, &scores_max.shape, DT_FP32);
+    tpu_aligned_stride(&scores_max_stride, 0, &scores_max.shape, DT_FP32);
     scores_max_stride.w = 0;
     tpu_bdc_fp_sub( score_tile.addr, score_tile.addr, scores_max.addr, &score_tile.shape, (score_tile.default_stride ? NULL : &score_tile.stride), (score_tile.default_stride ? NULL : &score_tile.stride), &scores_max_stride, DT_FP32);
     tpu_bdc_fp_mul_C( score_tile.addr, score_tile.addr, (scalar_t){.f32 = 0.0721688}, &score_tile.shape, (score_tile.default_stride ? NULL : &score_tile.stride), (score_tile.default_stride ? NULL : &score_tile.stride), DT_FP32);
@@ -473,7 +448,7 @@ void main_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
     tpu_bdc_fp_mul( logsum.addr, logsum.addr, scores_scale.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_scale.default_stride ? NULL : &scores_scale.stride), DT_FP32);
     tpu_bdc_fp_add( logsum.addr, logsum.addr, scores_sum.addr, &logsum.shape, (logsum.default_stride ? NULL : &logsum.stride), (logsum.default_stride ? NULL : &logsum.stride), (scores_sum.default_stride ? NULL : &scores_sum.stride), DT_FP32);
     dim4 scores_scale_stride;
-    __ppl_static_aligned_stride(&scores_scale_stride, &scores_scale.shape, DT_FP32);
+    tpu_aligned_stride(&scores_scale_stride, 0, &scores_scale.shape, DT_FP32);
     scores_scale_stride.w = 0;
     tpu_bdc_fp_mul( ctx_acc.addr, ctx_acc.addr, scores_scale.addr, &ctx_acc.shape, (ctx_acc.default_stride ? NULL : &ctx_acc.stride), (ctx_acc.default_stride ? NULL : &ctx_acc.stride), &scores_scale_stride, DT_FP32);
     __ppl_tensor_info score_tile_2 = {.shape = {1, 8, 1, 32} , .stride = score_tile.stride, .addr = score_tile.addr + ((0) * score_tile.stride.c+(0) * score_tile.stride.w ) * 4, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = ((0) * score_tile.stride.c+(0) * score_tile.stride.w ) * 4, .unsigned_flag = 0, .default_stride = score_tile.default_stride};
@@ -485,7 +460,7 @@ void main_kernel_inner(global_addr_t v1, global_addr_t v2, global_addr_t v3, glo
     tpu_bdc_fp_mm(ctx_acc.addr, prob_tile.addr, kv_value_tile.addr, 8, 32, 512, DT_FP32, DT_BFP16, true);
   }
   dim4 logsum_stride;
-  __ppl_static_aligned_stride(&logsum_stride, &logsum.shape, DT_FP32);
+  tpu_aligned_stride(&logsum_stride, 0, &logsum.shape, DT_FP32);
   logsum_stride.w = 0;
   tpu_bdc_fp_div( ctx_acc.addr, ctx_acc.addr, logsum.addr, &ctx_acc.shape, (ctx_acc.default_stride ? NULL : &ctx_acc.stride), (ctx_acc.default_stride ? NULL : &ctx_acc.stride), &logsum_stride, DT_FP32);
   __ppl_tensor_info ctx_acc_1 = {.shape = {1, 8, 1, 512} , .stride = ctx_acc.stride, .addr = ctx_acc.addr + ((0) * ctx_acc.stride.c+(0) * ctx_acc.stride.w ) * 4, .dtype = DT_FP32, .mode = 0, .size = 1, .offset = ((0) * ctx_acc.stride.c+(0) * ctx_acc.stride.w ) * 4, .unsigned_flag = 0, .default_stride = ctx_acc.default_stride};
@@ -558,11 +533,11 @@ typedef struct {
   global_addr_t v15;
   global_addr_t v16;
   global_addr_t v17;
-} tpu_kernel_api_main_inner_args_t;
-int main_kernel(const void * args) {
-  tpu_kernel_api_main_inner_args_t *api = (tpu_kernel_api_main_inner_args_t*)args;
+} tpu_kernel_api_latent_attention_fp8_prefill_kernel_args_t;
+int latent_attention_fp8_prefill_kernel(const void * args) {
+  tpu_kernel_api_latent_attention_fp8_prefill_kernel_args_t *api = (tpu_kernel_api_latent_attention_fp8_prefill_kernel_args_t*)args;
   tpu_initialize();
-  main_kernel_inner(api->v1,
+  latent_attention_fp8_prefill_kernel_inner(api->v1,
     api->v2,
     api->v3,
     api->v4,
@@ -582,4 +557,4 @@ int main_kernel(const void * args) {
   tpu_poll();
   return 0;
 }
-TPUKERNEL_FUNC_REGISTER(main_kernel)
+TPUKERNEL_FUNC_REGISTER(latent_attention_fp8_prefill_kernel)
