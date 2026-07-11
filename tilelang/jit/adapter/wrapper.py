@@ -625,6 +625,7 @@ class TLTPUSourceWrapper(object):
         "int32": "DT_INT32",
         "uint32": "DT_UINT32",
         "bfloat16": "DT_BFP16",
+        "e4m3_float8": "DT_FP8E4M3",
         "int8": "DT_INT8",
     }
 
@@ -632,6 +633,7 @@ class TLTPUSourceWrapper(object):
         "float32": 4,
         "float16": 2,
         "bfloat16": 2,
+        "e4m3_float8": 1,
         "int32": 4,
         "uint32": 4,
         "int16": 2,

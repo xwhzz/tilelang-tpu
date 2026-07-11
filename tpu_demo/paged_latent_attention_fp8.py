@@ -192,29 +192,40 @@ def _patch_generated_fused_multicore(head_count: int, block_num: int) -> None:
         f.write(cpp_src)
 
 
-def _rebuild_current_tpu_artifacts() -> None:
+def _rebuild_current_tpu_artifacts() -> tuple[str, str]:
     from tilelang.jit.adapter.libgen import LibraryGenerator
 
     target = tilelang.tvm.target.Target("tpu")
-    LibraryGenerator(target).compile_lib(timeout=180)
+    generator = LibraryGenerator(target)
+    generator.compile_lib(timeout=180)
+    return generator.libpath, os.environ["PPL_KERNEL_PATH"]
 
 
 def _bind_unique_so(kernel, name: str, multicore_head_loop: tuple[str, int, int] | None = None, multicore_attention: tuple[int, int] | None = None, multicore_fused: tuple[int, int] | None = None):
     """Bind matching host and device libraries for one compiled TPU kernel."""
     kernel_dir = os.environ["TPU_KERNEL_PATH"]
+    bound_dir = os.path.join(kernel_dir, "pla_bound")
+    os.makedirs(bound_dir, exist_ok=True)
+    rebuilt_artifacts = None
     if multicore_head_loop is not None:
         _patch_generated_head_multicore(*multicore_head_loop)
-        _rebuild_current_tpu_artifacts()
+        rebuilt_artifacts = _rebuild_current_tpu_artifacts()
     if multicore_attention is not None:
         _patch_generated_attention_multicore(*multicore_attention)
-        _rebuild_current_tpu_artifacts()
+        rebuilt_artifacts = _rebuild_current_tpu_artifacts()
     if multicore_fused is not None:
         _patch_generated_fused_multicore(*multicore_fused)
-        _rebuild_current_tpu_artifacts()
-    host_source = os.path.join(kernel_dir, "main.so")
-    host_target = os.path.join(kernel_dir, f"main_{name}.so")
-    device_source = os.path.join(kernel_dir, "libkernel.so")
-    device_target = os.path.join(kernel_dir, f"libkernel_{name}.so")
+        rebuilt_artifacts = _rebuild_current_tpu_artifacts()
+    if rebuilt_artifacts is None:
+        host_source = os.path.join(kernel_dir, "main.so")
+        device_source = os.path.join(kernel_dir, "libkernel.so")
+    else:
+        host_source, device_source = rebuilt_artifacts
+    # LibraryGenerator clears top-level ``*.so`` files before every TPU build.
+    # Keep bound host/device pairs in a subdirectory so compiling another
+    # kernel cannot invalidate an already-created callable.
+    host_target = os.path.join(bound_dir, f"main_{name}.so")
+    device_target = os.path.join(bound_dir, f"libkernel_{name}.so")
     shutil.copy(host_source, host_target)
     shutil.copy(device_source, device_target)
     for filename in ("kernel.c", "kernel.cpp", "kernel.h", "main.cpp"):
@@ -341,6 +352,8 @@ def paged_latent_attention_fp8_kernel(
             acc_o = T.alloc_shared([valid_block_h, latent_dim], accum_dtype)
             max_v = T.alloc_shared([valid_block_h, 1], accum_dtype)
             max_prev = T.alloc_shared([valid_block_h, 1], accum_dtype)
+            max_curr = T.alloc_shared([valid_block_h, 1], accum_dtype)
+            max_pair = T.alloc_shared([valid_block_h, 2], accum_dtype)
             rescale = T.alloc_shared([valid_block_h, 1], accum_dtype)
             score_sum = T.alloc_shared([valid_block_h, 1], accum_dtype)
             logsum = T.alloc_shared([valid_block_h, 1], accum_dtype)
@@ -367,8 +380,19 @@ def paged_latent_attention_fp8_kernel(
                 T.ppl_gemm(q_pe, pe_s, score_pe, transpose_B=True)
                 T.ppl_add(score, score, score_pe)
                 T.copy(max_v, max_prev)
+                T.ppl_fill(max_curr, -T.infinity(accum_dtype))
+                T.ppl_reduce_max(score, max_curr, dim=1, clear=False)
+
+                # Online softmax must normalize against the running maximum,
+                # not just the maximum of the current KV tile.  Keeping only
+                # the per-tile maximum makes ``exp(prev_max - curr_max)`` grow
+                # above one when a later tile has a smaller maximum, which can
+                # overflow for multi-tile (long-context) attention.
+                T.copy(max_prev, max_pair[:, 0:1])
+                T.copy(max_curr, max_pair[:, 1:2])
                 T.ppl_fill(max_v, -T.infinity(accum_dtype))
-                T.ppl_reduce_max(score, max_v, dim=1, clear=False)
+                T.ppl_reduce_max(max_pair, max_v, dim=1, clear=False)
+
                 prev_scaled = T.alloc_shared([valid_block_h, 1], accum_dtype)
                 curr_scaled = T.alloc_shared([valid_block_h, 1], accum_dtype)
                 T.ppl_mul_C(prev_scaled, max_prev, scale)
@@ -863,6 +887,8 @@ def paged_latent_attention_fp8_fused_kernel(
             acc_o = T.alloc_shared([1, kv_lora_rank], accum_dtype)
             max_v = T.alloc_shared([1, 1], accum_dtype)
             max_prev = T.alloc_shared([1, 1], accum_dtype)
+            max_curr = T.alloc_shared([1, 1], accum_dtype)
+            max_pair = T.alloc_shared([1, 2], accum_dtype)
             rescale = T.alloc_shared([1, 1], accum_dtype)
             score_sum = T.alloc_shared([1, 1], accum_dtype)
             logsum = T.alloc_shared([1, 1], accum_dtype)
@@ -879,8 +905,17 @@ def paged_latent_attention_fp8_fused_kernel(
                 T.ppl_gemm(q_pe, pe_s, score_pe, transpose_B=True)
                 T.ppl_add(score, score, score_pe)
                 T.copy(max_v, max_prev)
+                T.ppl_fill(max_curr, -T.infinity(accum_dtype))
+                T.ppl_reduce_max(score, max_curr, dim=1, clear=False)
+
+                # Preserve the global running maximum across KV tiles.  This
+                # keeps both the previous accumulator rescale and the current
+                # tile probabilities in the same softmax normalization frame.
+                T.copy(max_prev, max_pair[:, 0:1])
+                T.copy(max_curr, max_pair[:, 1:2])
                 T.ppl_fill(max_v, -T.infinity(accum_dtype))
-                T.ppl_reduce_max(score, max_v, dim=1, clear=False)
+                T.ppl_reduce_max(max_pair, max_v, dim=1, clear=False)
+
                 prev_scaled = T.alloc_shared([1, 1], accum_dtype)
                 curr_scaled = T.alloc_shared([1, 1], accum_dtype)
                 T.ppl_mul_C(prev_scaled, max_prev, scale)
