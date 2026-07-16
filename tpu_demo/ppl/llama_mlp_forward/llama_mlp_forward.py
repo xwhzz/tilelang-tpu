@@ -8,9 +8,9 @@ def get_llama_mlp_forward_kernel(
     batch_seq: int,
     hidden_size: int,
     intermediate_size: int,
-    Block_bs: int = 64,
-    Block_h: int = 64,
-    Block_i: int = 64,
+    Block_bs: int = 32,
+    Block_h: int = 32,
+    Block_i: int = 32,
     dtype: str = "bfloat16",
     accum_dtype: str = "float32"
 ):
@@ -163,12 +163,11 @@ def get_llama_mlp_forward_kernel(
 
 
 if __name__ == "__main__":
-    batch_seq = 16
-    hidden_size = 16
-    intermediate_size = 16
+    batch_seq = 32
+    hidden_size = 32
+    intermediate_size = 32
     func = get_llama_mlp_forward_kernel(
         batch_seq, hidden_size, intermediate_size,
-        Block_bs=8, Block_h=8, Block_i=8,
         dtype="bfloat16", accum_dtype="float32"
     )
     mod = tilelang.lower(func, target='c')
