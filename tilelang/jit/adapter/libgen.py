@@ -95,6 +95,15 @@ class LibraryGenerator(object):
                 raise EnvironmentError("PPL_PROJECT_ROOT environment variable is not set.")
             CHIP = "bm1690"
 
+            # Clean stale artifacts so ctypes.CDLL doesn't cache old .so
+            import glob
+            tpu_dir = get_tpu_template_dir()
+            for stale in glob.glob(f"{tpu_dir}/*.o") + glob.glob(f"{tpu_dir}/*.so"):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+
             if mode=="pcie":
                 self.tpu_compile_pcie(timeout=timeout, PPL_TOP=PPL_TOP, CHIP=CHIP)
             elif mode=="cmodel":
@@ -102,7 +111,20 @@ class LibraryGenerator(object):
             else:
                 raise ValueError(f"Unsupported compile mode: {mode}")
             self.srcpath = src.name
-            self.libpath = f"{get_tpu_template_dir()}/main.so"
+            # Use unique paths to avoid ctypes.CDLL dlopen cache across compilations
+            import time
+            uniq = f"{os.getpid()}_{int(time.time()*1e6)}"
+            tpu_dir = get_tpu_template_dir()
+            main_path = f"{tpu_dir}/main.so"
+            kernel_path = f"{tpu_dir}/libkernel.so"
+            main_unique = f"{tpu_dir}/main_{uniq}.so"
+            kernel_unique = f"{tpu_dir}/libkernel_{uniq}.so"
+            if os.path.exists(main_path):
+                os.rename(main_path, main_unique)
+            if os.path.exists(kernel_path):
+                os.rename(kernel_path, kernel_unique)
+            self.libpath = main_unique if os.path.exists(main_unique) else main_path
+            os.environ["PPL_KERNEL_PATH"] = kernel_unique if os.path.exists(kernel_unique) else kernel_path
             return
 
         else:
@@ -175,12 +197,16 @@ class LibraryGenerator(object):
             f"-I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include"
         ]
 
-        # 构建库路径
-        lib_paths = [
-            "-L/lib/x86_64-linux-gnu/",
+        # 构建库路径 (device-side)
+        device_lib_paths = [
             f"-L{PPL_TOP}/runtime/{CHIP}/lib",
+        ]
+
+        # 构建库路径 (host-side, real hardware first)
+        host_lib_paths = [
             "-L/opt/tpuv7/tpuv7-current/lib/",
-            f"-L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib"
+            f"-L{PPL_TOP}/runtime/{CHIP}/lib",
+            f"-L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
         ]
         src_dir = get_tpu_template_dir()
 
@@ -200,7 +226,7 @@ class LibraryGenerator(object):
 
         # 编译ppl_helper.c
         cmd2 = [
-            f"{CROSS_COMPILE}gcc", 
+            f"{CROSS_COMPILE}gcc",
             "-D__bm1690__",
             "-Dlibkernel_EXPORTS",
             *includes,
@@ -212,22 +238,22 @@ class LibraryGenerator(object):
             f"{src_dir}/ppl_helper.o"
         ]
 
-        # 链接命令 - 创建共享库
+        # 链接命令 - 创建共享库 (RISC-V device code)
         link_cmd = [
             f"{CROSS_COMPILE}gcc",
             "-fPIC",
-            "-Wl,--no-undefined", 
+            "-Wl,--no-undefined",
             "-shared",
             "-Wl,-soname,libkernel.so",
             "-o", f"{src_dir}/libkernel.so",
             f"{src_dir}/kernel.o",
             f"{src_dir}/ppl_helper.o",
-            *lib_paths,
-            "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
+            *device_lib_paths,
+            "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib",
             "-Wl,--whole-archive",
             "-Wl,-Bstatic",
             f"-l{CHIP}",
-            "-Wl,-Bdynamic", 
+            "-Wl,-Bdynamic",
             "-Wl,--no-whole-archive",
             "-lm"
         ]
@@ -245,7 +271,7 @@ class LibraryGenerator(object):
 
 
         
-        # 1. 编译main.cpp
+        # 1. 编译kernel.cpp (host-side C++ wrapper)
         cmd4 = [
             "g++",
             f"-D__{CHIP}__",
@@ -258,22 +284,22 @@ class LibraryGenerator(object):
             "-o",
             f"{src_dir}/kernel_host.o"
         ]
-        
-        # 2. 编译main.cpp
+
+        # 2. 编译main.cpp (host-side entry point)
         cmd5 = [
             "g++",
-            f"-D__{CHIP}__", 
+            f"-D__{CHIP}__",
             *includes,
             "-Wl,--no-undefined",
             "-std=c++11",
-            "-fPIC", 
+            "-fPIC",
             "-c",
             f"{src_dir}/main.cpp",
             "-o",
             f"{src_dir}/main.o"
         ]
-        
-        # 3. 生成动态库
+
+        # 3. 生成动态库 (host-side main.so, links real PCIe runtime)
         cmd_shared = [
             "g++",
             "-shared",
@@ -283,10 +309,9 @@ class LibraryGenerator(object):
             f"{src_dir}/main.so",
             f"{src_dir}/kernel_host.o",
             f"{src_dir}/main.o",
-            *lib_paths,
-            "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
+            *host_lib_paths,
+            "-Wl,-rpath," + "/opt/tpuv7/tpuv7-current/lib/:" + f"{PPL_TOP}/runtime/{CHIP}/lib",
             "-ltpuv7_rt",
-            "-lcdm_daemon_emulator", 
             "-lpthread"
         ]
 
@@ -299,6 +324,9 @@ class LibraryGenerator(object):
 
         if ret1.returncode != 0 or ret2.returncode != 0 or ret3.returncode != 0:
             raise RuntimeError(f"Host Compilation Failed! {cmd_shared}")
+
+        # Set PPL_KERNEL_PATH so main.so can find libkernel.so at runtime
+        os.environ["PPL_KERNEL_PATH"] = f"{src_dir}/libkernel.so"
 
 
     def tpu_compile_cmodel(self, PPL_TOP, CHIP, timeout):
@@ -413,3 +441,6 @@ class LibraryGenerator(object):
         -ltpuv7_rt -lcdm_daemon_emulator -lpthread"""
                 
         execute_command(cmd6, "Link main.so lib", timeout)
+
+        # Set PPL_KERNEL_PATH so main.so can find libkernel.so at runtime
+        os.environ["PPL_KERNEL_PATH"] = f"{OUTPUT_PATH}/libkernel.so"
