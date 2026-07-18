@@ -10,6 +10,12 @@ import tilelang
 import tilelang.language as T
 
 
+def choose_blk_m(m, max_blk_m=128):
+    blk_m = min(m, max_blk_m)
+    while m % blk_m != 0:
+        blk_m -= 1
+    return blk_m
+
 def vllm_sophgo_rmsnorm_forward(M, N, blk_m=32, eps=1e-6, dtype="float16"):
     @T.prim_func
     def main_kernel_inner(
@@ -59,7 +65,7 @@ def copy_forward(M, N, blk_m=32, dtype="float16"):
 
 
 def build_kernel(m, n, eps=1e-6, dtype="float16", kernel_mode="rmsnorm"):
-    blk_m = 32
+    blk_m = choose_blk_m(m)
     if kernel_mode == "copy":
         program = copy_forward(m, n, blk_m, dtype)
     else:
@@ -96,7 +102,8 @@ def run_verify():
     else:
         output = torch.zeros(m, n).half()
 
-    kernel(x, weight, output)
+    ret = kernel(x, weight, output)
+    print(f"[rmsnorm] kernel ret: {ret}")
 
     if kernel_mode == "copy":
         ref = x
@@ -147,7 +154,8 @@ def main():
     kernel, x, weight, output = run_verify()
     warmup = int(os.environ.get("BENCH_WARMUP", "10"))
     iters = int(os.environ.get("BENCH_ITERS", "50"))
-    run_benchmark(kernel, x, weight, output, warmup=warmup, iters=iters)
+    if iters > 0:
+        run_benchmark(kernel, x, weight, output, warmup=warmup, iters=iters)
 
 
 if __name__ == "__main__":

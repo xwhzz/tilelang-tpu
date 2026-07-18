@@ -6,8 +6,15 @@ import tilelang.language as T
 import torch
 
 
-def vllm_sophgo_rmsnorm_forward(M, N, blk_m=32, eps=1e-6, dtype="float16"):
-    """vLLM/Sophgo-style RMSNorm forward: output = rmsnorm(input) * weight."""
+def _choose_blk_m(M, max_blk_m=128):
+    blk_m = min(M, max_blk_m)
+    while M % blk_m != 0:
+        blk_m -= 1
+    return blk_m
+
+def vllm_sophgo_rmsnorm_forward(M, N, blk_m=None, eps=1e-6, dtype="float16"):
+    if blk_m is None:
+        blk_m = _choose_blk_m(M)
 
     @T.prim_func
     def main_kernel_inner(
@@ -44,7 +51,7 @@ if __name__ == "__main__":
     M = 128
     N = 128
     eps = 1e-6
-    blk_m = 32
+    blk_m = _choose_blk_m(M)
     dtype = "float16"
     kernel = tilelang.compile(
         vllm_sophgo_rmsnorm_forward(M, N, blk_m, eps, dtype),
