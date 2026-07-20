@@ -624,21 +624,14 @@ class TLTPUSourceWrapper(object):
         "float16": "DT_FP16",
         "int32": "DT_INT32",
         "uint32": "DT_UINT32",
-        "bfloat16": "DT_BFP16",
-        "e5m2_float8": "DT_FP8E5M2",
-        "e4m3_float8": "DT_FP8E4M3",
-        "int16": "DT_INT16",
-        "uint16": "DT_UINT16",
-        "int8": "DT_INT8",
         "uint8": "DT_UINT8",
+        "bfloat16": "DT_BFP16",
     }
 
     _ELEM_BYTES = {
         "float32": 4,
         "float16": 2,
         "bfloat16": 2,
-        "e5m2_float8": 1,
-        "e4m3_float8": 1,
         "int32": 4,
         "uint32": 4,
         "int16": 2,
@@ -708,10 +701,13 @@ class TLTPUSourceWrapper(object):
             template_content = f.read()
 
         # 生成参数相关的内容
+        import os
+        core_num = int(os.environ.get("TILELANG_TPU_NUM_CORES", "1"))
         param_names = [f"ptr_v{i+1}" for i in range(num_params)]
         
         # 结构体成员
         struct_members = "\n  ".join([f"unsigned long long {name};" for name in param_names])
+        struct_members += "\n  int bx_id;"
         
         # 函数参数
         func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
@@ -722,7 +718,8 @@ class TLTPUSourceWrapper(object):
                     struct_members=struct_members,
                     function_name=function_name,
                     func_params=func_params,
-                    struct_params=struct_params
+                    struct_params=struct_params,
+                    core_num=core_num
                 )
         
         with open(output_file, 'w') as f:
@@ -737,15 +734,21 @@ class TLTPUSourceWrapper(object):
             template_content = f.read()
         
         # 生成参数相关的内容
+        import os
+        core_num = int(os.environ.get("TILELANG_TPU_NUM_CORES", "1"))
         param_names = [f"ptr_v{i+1}" for i in range(num_params)]
         func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
         struct_assignments = "\n  ".join([f"api.{name} = {name};" for name in param_names])
         
         # 格式化内容
+        import os
+        core_num = int(os.environ.get("TILELANG_TPU_NUM_CORES", "1"))
+
         formatted_content = template_content.format(
             function_name=function_name,
             func_params=func_params,
-            struct_assignments=struct_assignments
+            struct_assignments=struct_assignments,
+            core_num=core_num
         )
         
         with open(output_file, 'w') as f:
