@@ -100,7 +100,7 @@ def _patch_generated_attention_multicore(head_count: int, block_num: int) -> Non
     end = c_src.find(cache_end, start)
     if start < 0 or end < 0:
         raise RuntimeError("expected attention cache/gather block not found")
-    end += len(cache_end)
+    end += len("    }\n")
     cache_block = c_src[start:end]
     guarded = (
         "    if (__pla_block_idx == 0 && by == __pla_h_begin) {\n"
@@ -159,17 +159,17 @@ def _patch_generated_fused_multicore(head_count: int, block_num: int) -> None:
     c_src = c_src.replace(loop, patched_loop, 1)
 
     cache_start = "    tpu_gdma_cpy_L2S(pe_new_rope.addr, "
-    cache_end = (
-        "    {\n"
-        "    dim4 __gather_block_shape = {1, 1, 2, 1024};\n"
-        "    tpu_gdma_h_gather_S2S(v32.addr, v24.addr, v29.addr, false, (scalar_t){.u32 = 0}, &__gather_block_shape, 2, NULL, NULL, NULL, DT_BFP16);\n"
-        "    }\n"
-    )
     start = c_src.find(cache_start)
-    end = c_src.find(cache_end, start)
+    # The generated gather width depends on the selected tile/core schedule;
+    # locate the PE-cache gather by its stable buffer operands instead of a
+    # hard-coded dim4 (the old 2x1024 form becomes 8x1024 for block_n=64).
+    gather = c_src.find(
+        "    tpu_gdma_h_gather_S2S(v32.addr, v24.addr, v29.addr,", start
+    )
+    end = c_src.find("    }\n", gather) if gather >= 0 else -1
     if start < 0 or end < 0:
         raise RuntimeError("expected fused cache/gather block not found")
-    end += len(cache_end)
+    end += len("    }\n")
     cache_block = c_src[start:end]
     guarded = (
         "    if (__pla_block_idx == 0 && by == __pla_h_begin) {\n"
@@ -787,12 +787,10 @@ def paged_latent_attention_fp8_fused_kernel(
                 weight_nope_bf16 = T.alloc_shared([nope_dim, block_size], dtype)
                 scale_nope = T.alloc_shared([nope_dim, 1], dtype)
                 weight_nope = T.alloc_shared([nope_dim, block_size], dtype)
-                partial_nope = T.alloc_shared([1, nope_dim], accum_dtype)
                 weight_rope_fp8 = T.alloc_shared([rope_dim, block_size], fp8_dtype)
                 weight_rope_bf16 = T.alloc_shared([rope_dim, block_size], dtype)
                 scale_rope = T.alloc_shared([rope_dim, 1], dtype)
                 weight_rope = T.alloc_shared([rope_dim, block_size], dtype)
-                partial_rope = T.alloc_shared([1, rope_dim], accum_dtype)
                 T.copy(query[:, ib * block_size:(ib + 1) * block_size],
                        query_shared)
                 T.copy(
@@ -811,10 +809,11 @@ def paged_latent_attention_fp8_fused_kernel(
                     scale_nope,
                 )
                 T.ppl_mul(weight_nope, weight_nope_bf16, scale_nope)
-                T.ppl_clear(partial_nope)
-                T.ppl_gemm(query_shared, weight_nope, partial_nope,
+                # ppl_gemm accumulates into C.  Keep the projection result in
+                # its final FP32 accumulator instead of clearing a temporary
+                # tensor and adding that tensor after every input block.
+                T.ppl_gemm(query_shared, weight_nope, q_nope_acc,
                            transpose_B=True)
-                T.ppl_add(q_nope_acc, q_nope_acc, partial_nope)
 
                 T.copy(
                     wuq[
@@ -832,10 +831,8 @@ def paged_latent_attention_fp8_fused_kernel(
                     scale_rope,
                 )
                 T.ppl_mul(weight_rope, weight_rope_bf16, scale_rope)
-                T.ppl_clear(partial_rope)
-                T.ppl_gemm(query_shared, weight_rope, partial_rope,
+                T.ppl_gemm(query_shared, weight_rope, q_rope_acc,
                            transpose_B=True)
-                T.ppl_add(q_rope_acc, q_rope_acc, partial_rope)
 
             T.copy(q_nope_acc, q_nope)
             T.copy(q_rope_acc, q_rope)
@@ -952,7 +949,6 @@ def paged_latent_attention_fp8_fused_kernel(
                 weight_bf16 = T.alloc_shared([block_size, block_size], dtype)
                 scale_rows = T.alloc_shared([block_size, 1], dtype)
                 weight_dequant = T.alloc_shared([block_size, block_size], dtype)
-                partial = T.alloc_shared([1, value_dim], accum_dtype)
                 T.copy(acc_o[:, ib * block_size:(ib + 1) * block_size],
                        latent_shared)
                 T.copy(
@@ -971,10 +967,10 @@ def paged_latent_attention_fp8_fused_kernel(
                     scale_rows,
                 )
                 T.ppl_mul(weight_dequant, weight_bf16, scale_rows)
-                T.ppl_clear(partial)
-                T.ppl_gemm(latent_shared, weight_dequant, partial,
+                # Accumulate each input-rank block directly into the final
+                # output accumulator, mirroring the attention GEMM path.
+                T.ppl_gemm(latent_shared, weight_dequant, value_acc,
                            transpose_B=True)
-                T.ppl_add(value_acc, value_acc, partial)
             T.copy(value_acc, value_out)
             T.copy(value_out, output[:, by:by + 1, :, :])
 
@@ -1004,6 +1000,9 @@ class PagedLatentAttentionFp8Config:
     logical_blocks: int = 2
     paged_cache_block_size: int = 16
     softmax_scale: float = (128 + 64) ** -0.5
+    # Long-context tuning: a wider KV/PE tile reduces copy and softmax-merge
+    # iterations.  ``None`` selects the measured context-aware default.
+    attention_block_n: int | None = None
 
 
 class PagedLatentAttentionFp8:
@@ -1023,6 +1022,18 @@ class PagedLatentAttentionFp8:
             f"h{config.num_heads}_qr{config.q_lora_rank}_"
             f"kr{config.kv_lora_rank}"
         )
+        block_n = (
+            self.config.attention_block_n
+            if self.config.attention_block_n is not None
+            else (
+                16 if self.context_rows < 32 else
+                64 if self.context_rows >= 128 else 32
+            )
+        )
+        if self.context_rows % block_n != 0:
+            raise ValueError(
+                f"attention_block_n={block_n} must divide context_rows={self.context_rows}"
+            )
 
         self.kernel = _bind_unique_so(tilelang.compile(
             paged_latent_attention_fp8_fused_kernel(
@@ -1036,6 +1047,7 @@ class PagedLatentAttentionFp8:
                 config.value_head_dim,
                 block_size=config.quant_block_size,
                 paged_block_size=config.paged_cache_block_size,
+                block_n=block_n,
                 score_scale=config.softmax_scale,
             ),
             out_idx=[5, 6, 13, 14, 15, 16],
