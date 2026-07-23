@@ -701,7 +701,7 @@ class TLTPUSourceWrapper(object):
             template_content = f.read()
 
         # 生成参数相关的内容
-        param_names = [f"ptr_v{i+1}" for i in range(num_params)]
+        param_names = [f"v{i+1}" for i in range(num_params)]
         
         # 结构体成员
         struct_members = "\n  ".join([f"unsigned long long {name};" for name in param_names])
@@ -730,7 +730,7 @@ class TLTPUSourceWrapper(object):
             template_content = f.read()
         
         # 生成参数相关的内容
-        param_names = [f"ptr_v{i+1}" for i in range(num_params)]
+        param_names = [f"v{i+1}" for i in range(num_params)]
         func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
         struct_assignments = "\n  ".join([f"api.{name} = {name};" for name in param_names])
         
