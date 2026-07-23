@@ -775,67 +775,43 @@ def paged_latent_attention_fp8_fused_kernel(
 
             q_nope = T.alloc_shared([1, nope_dim], dtype)
             q_rope = T.alloc_shared([1, rope_dim], dtype)
-            q_nope_acc = T.alloc_shared([1, nope_dim], accum_dtype)
-            q_rope_acc = T.alloc_shared([1, rope_dim], accum_dtype)
+            q_full_acc = T.alloc_shared([1, q_head_dim], accum_dtype)
             q_abs = T.alloc_shared([1, kv_lora_rank], dtype)
-            T.ppl_clear(q_nope_acc)
-            T.ppl_clear(q_rope_acc)
+            T.ppl_clear(q_full_acc)
 
             for ib in T.serial(q_in_blocks):
                 query_shared = T.alloc_shared([1, block_size], dtype)
-                weight_nope_fp8 = T.alloc_shared([nope_dim, block_size], fp8_dtype)
-                weight_nope_bf16 = T.alloc_shared([nope_dim, block_size], dtype)
-                scale_nope = T.alloc_shared([nope_dim, 1], dtype)
-                weight_nope = T.alloc_shared([nope_dim, block_size], dtype)
-                weight_rope_fp8 = T.alloc_shared([rope_dim, block_size], fp8_dtype)
-                weight_rope_bf16 = T.alloc_shared([rope_dim, block_size], dtype)
-                scale_rope = T.alloc_shared([rope_dim, 1], dtype)
-                weight_rope = T.alloc_shared([rope_dim, block_size], dtype)
+                weight_fp8 = T.alloc_shared([q_head_dim, block_size], fp8_dtype)
+                weight_bf16 = T.alloc_shared([q_head_dim, block_size], dtype)
+                scale_rows = T.alloc_shared([q_head_dim, 1], dtype)
+                weight_dequant = T.alloc_shared([q_head_dim, block_size], dtype)
                 T.copy(query[:, ib * block_size:(ib + 1) * block_size],
                        query_shared)
                 T.copy(
                     wuq[
-                        by * q_head_dim:by * q_head_dim + nope_dim,
+                        by * q_head_dim:(by + 1) * q_head_dim,
                         ib * block_size:(ib + 1) * block_size,
                     ],
-                    weight_nope_fp8,
+                    weight_fp8,
                 )
-                T.copy(weight_nope_fp8, weight_nope_bf16)
+                T.copy(weight_fp8, weight_bf16)
                 T.copy(
                     wuq_scale_expanded[
-                        by * q_head_dim:by * q_head_dim + nope_dim,
+                        by * q_head_dim:(by + 1) * q_head_dim,
                         ib:ib + 1,
                     ],
-                    scale_nope,
+                    scale_rows,
                 )
-                T.ppl_mul(weight_nope, weight_nope_bf16, scale_nope)
-                # ppl_gemm accumulates into C.  Keep the projection result in
-                # its final FP32 accumulator instead of clearing a temporary
-                # tensor and adding that tensor after every input block.
-                T.ppl_gemm(query_shared, weight_nope, q_nope_acc,
+                T.ppl_mul(weight_dequant, weight_bf16, scale_rows)
+                # Compute the contiguous 128-dim nope and 64-dim rope rows in
+                # one projection.  This removes one conversion, scale/mul,
+                # and GEMM dispatch per input-rank block while preserving the
+                # same FP32 accumulation order along the input dimension.
+                T.ppl_gemm(query_shared, weight_dequant, q_full_acc,
                            transpose_B=True)
 
-                T.copy(
-                    wuq[
-                        by * q_head_dim + nope_dim:(by + 1) * q_head_dim,
-                        ib * block_size:(ib + 1) * block_size,
-                    ],
-                    weight_rope_fp8,
-                )
-                T.copy(weight_rope_fp8, weight_rope_bf16)
-                T.copy(
-                    wuq_scale_expanded[
-                        by * q_head_dim + nope_dim:(by + 1) * q_head_dim,
-                        ib:ib + 1,
-                    ],
-                    scale_rope,
-                )
-                T.ppl_mul(weight_rope, weight_rope_bf16, scale_rope)
-                T.ppl_gemm(query_shared, weight_rope, q_rope_acc,
-                           transpose_B=True)
-
-            T.copy(q_nope_acc, q_nope)
-            T.copy(q_rope_acc, q_rope)
+            T.copy(q_full_acc[:, 0:nope_dim], q_nope)
+            T.copy(q_full_acc[:, nope_dim:q_head_dim], q_rope)
 
             for ib in T.serial(kv_in_blocks):
                 weight_fp8 = T.alloc_shared([block_size, block_size], fp8_dtype)
