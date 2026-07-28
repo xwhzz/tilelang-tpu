@@ -513,6 +513,14 @@ private:
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kRead);
       mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "ppl.gather_block") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
+    } else if (op_name == "ppl.scatter") {
+      mark_arg(1, BufferAccessKind::kWrite);
+      mark_arg(2, BufferAccessKind::kRead);
+      mark_arg(3, BufferAccessKind::kRead);
     } else if (op_name == "ppl.topk") {
       mark_arg(1, BufferAccessKind::kWrite);
       mark_arg(2, BufferAccessKind::kWrite);
