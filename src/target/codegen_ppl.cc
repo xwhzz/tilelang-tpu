@@ -1053,12 +1053,13 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ", .unsigned_flag = 0, .default_stride = false};\n");
         } else if (is_local) {
           auto parent_var = var_idmap_[src_buffer->data.get()];
-          std::string min_expr;
           std::vector<std::string> strides = {
               parent_var + ".stride.n", parent_var + ".stride.c",
               parent_var + ".stride.h", parent_var + ".stride.w"};
           std::vector<int> stride_idx =
               StrideIndicesForRank(src_ranges.size(), true);
+          std::string c_idx = "0";
+          std::string non_c_expr;
           for (size_t i = 0; i < src_ranges.size(); i++) {
             auto sr = src_ranges[i];
             const PrimExpr &e = sr->min;
@@ -1068,15 +1069,36 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
             } else {
               idx_str = PrintExpr(e);
             }
-            min_expr += "(" + idx_str + ") * " + strides[stride_idx[i]] + "+";
+            if (stride_idx[i] == 1) {
+              c_idx = idx_str;
+            } else {
+              non_c_expr +=
+                  "(" + idx_str + ") * " + strides[stride_idx[i]] + "+";
+            }
           }
-          min_expr[min_expr.size() - 1] = ' ';
-          min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
+          if (non_c_expr.empty()) {
+            non_c_expr = "0";
+          } else {
+            non_c_expr[non_c_expr.size() - 1] = ' ';
+            non_c_expr = "(" + non_c_expr + ")";
+          }
+          // Local memory C/channel offsets move across NPU lanes.  W/H/N
+          // offsets remain linear within the selected lane.
+          std::string channel_expr =
+              "(tpu_npu_index(" + parent_var + ".addr) + (" + c_idx + "))";
+          std::string addr_expr =
+              "((" + channel_expr + " % NPU_NUM) * LOCAL_MEM_SIZE + (" +
+              parent_var + ".addr % LOCAL_MEM_SIZE) + (" + channel_expr +
+              " / NPU_NUM) * " + parent_var + ".stride.c * " +
+              std::to_string(bytes_size) + " + (" + non_c_expr + ") * " +
+              std::to_string(bytes_size) + ")";
+          std::string offset_expr =
+              "(" + addr_expr + " - " + parent_var + ".addr)";
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
                          src_shape + ", .stride = " + parent_var +
-                         ".stride, .addr = " + parent_var +
-                         ".addr + " + min_expr + ", .dtype = " + dtype +
-                         ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
+                         ".stride, .addr = " + addr_expr +
+                         ", .dtype = " + dtype +
+                         ", .mode = 0, .size = 1, .offset = " + offset_expr + ", "
                          ".unsigned_flag = 0, .default_stride = " + parent_var +
                          ".default_stride};\n");
         } else {
@@ -1155,8 +1177,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           ppl_inst += "tpu_gdma_cpy_S2L";
         } else if (src_flag == "local" && dst_flag == "global") {
           ppl_inst += "tpu_gdma_cpy_L2S";
+        } else if (src_flag == "local" && dst_flag == "local") {
+          ppl_inst += "tpu_gdma_cpy_L2L";
         } else {
-          // local mem -> local mem copy within the same NPU
           ppl_inst += "tpu_bdc_cpy";
         }
 
