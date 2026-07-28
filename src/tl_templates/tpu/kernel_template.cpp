@@ -30,15 +30,16 @@ tpu_kernel_api_{function_name}_t fill_{function_name}_struct({func_params}) {{
 }}
 
 int {function_name}({func_params}) {{
-  int core_num = 1;
+  int core_num = {core_num};
   tpu_kernel_api_{function_name}_t api;
   int ret = 0;
   {struct_assignments}
   int group_num = 1;
-  int block_num = 1;
+  int block_num = core_num;
   tpu_kernel_api_{function_name}_t apis[core_num];
   for (int i = 0; i < core_num; ++i) {{
     apis[i] = api;
+    apis[i].bx_id = i;
   }}
   ret = tpuRtKernelLaunch(tpu_module, "{function_name}", &apis, sizeof(apis), group_num, block_num, stream);
   if (ret != 0) {{

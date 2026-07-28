@@ -30,8 +30,6 @@
 
 #include <string>
 #include <unordered_map>
-#include <utility>
-#include <vector>
 
 #include "target/source/codegen_c.h"
 
@@ -41,6 +39,7 @@ namespace codegen {
 class CodeGenTileLangPPL final : public CodeGenC {
 public:
   CodeGenTileLangPPL();
+  void SetNumCores(int n) { num_cores_ = n; }
   std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
@@ -72,8 +71,8 @@ public:
   void VisitStmt_(const AllocateNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const LetStmtNode *op) final;
-  void VisitExpr_(const FloorDivNode *op, std::ostream &os) final;
-  void VisitExpr_(const FloorModNode *op, std::ostream &os) final;
+  void VisitExpr_(const FloorModNode *op, std::ostream &os);
+  void VisitExpr_(const FloorDivNode *op, std::ostream &os);
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const PrimFunc &f);
@@ -98,6 +97,7 @@ private:
   std::string AllocLocalVarID(const tir::VarNode *v);
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
+  int num_cores_ = 1;
   // whether need mma.h
   bool need_mma_h_{false};
   // whether need cast_smem_ptr_to_int helper function
@@ -127,7 +127,6 @@ private:
   int32_t gemm_idx_ = 0;
 
   DictAttrs f_attrs;
-  std::vector<std::pair<tir::Var, Range>> loop_var_ranges_;
 };
 
 } // namespace codegen

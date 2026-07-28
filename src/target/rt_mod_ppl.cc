@@ -18,6 +18,7 @@
  */
 
 #include "codegen_ppl.h"
+#include <cstdlib>
 
 namespace tvm {
 namespace codegen {
@@ -27,6 +28,8 @@ std::string BuildTileLangPPL(IRModule mod) {
   using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangPPL cg;
+  const char* env_cores = getenv("TILELANG_TPU_NUM_CORES");
+  if (env_cores) cg.SetNumCores(atoi(env_cores));
   cg.Init(output_ssa);
 
   for (auto kv : mod->functions) {
