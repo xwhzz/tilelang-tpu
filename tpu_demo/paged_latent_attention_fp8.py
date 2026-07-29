@@ -841,15 +841,25 @@ def paged_latent_attention_fp8_fused_kernel(
             T.copy(q_full_acc[:, 0:nope_dim], q_nope)
             T.copy(q_full_acc[:, nope_dim:q_head_dim], q_rope)
 
+            # Mirror the PPL decode kernel's WUKV preparation: load and
+            # dequantize the K/V rows together, then keep the V half in
+            # transient local storage across the attention calculation.
+            wukv_v_local = T.alloc_shared([value_dim, kv_lora_rank], dtype)
             for ib in T.serial(kv_in_blocks):
-                weight_fp8 = T.alloc_shared([block_size, block_size], fp8_dtype)
-                weight_bf16 = T.alloc_shared([block_size, block_size], dtype)
-                scale_rows = T.alloc_shared([block_size, 1], dtype)
-                weight_dequant = T.alloc_shared([block_size, block_size], dtype)
+                weight_fp8 = T.alloc_shared(
+                    [wukv_head_dim, block_size], fp8_dtype
+                )
+                weight_bf16 = T.alloc_shared(
+                    [wukv_head_dim, block_size], dtype
+                )
+                scale_rows = T.alloc_shared([wukv_head_dim, 1], dtype)
+                k_weight_block = T.alloc_shared(
+                    [block_size, block_size], dtype
+                )
                 acc = T.alloc_shared([1, block_size], accum_dtype)
                 T.copy(
                     wukv[
-                        by * wukv_head_dim:by * wukv_head_dim + block_size,
+                        by * wukv_head_dim:(by + 1) * wukv_head_dim,
                         ib * block_size:(ib + 1) * block_size,
                     ],
                     weight_fp8,
@@ -857,14 +867,21 @@ def paged_latent_attention_fp8_fused_kernel(
                 T.copy(weight_fp8, weight_bf16)
                 T.copy(
                     wukv_scale_expanded[
-                        by * wukv_head_dim:by * wukv_head_dim + block_size,
+                        by * wukv_head_dim:(by + 1) * wukv_head_dim,
                         ib:ib + 1,
                     ],
                     scale_rows,
                 )
-                T.ppl_mul(weight_dequant, weight_bf16, scale_rows)
+                T.ppl_mul(weight_bf16, weight_bf16, scale_rows)
+                T.copy(weight_bf16[0:block_size, :], k_weight_block)
+                T.copy(
+                    weight_bf16[block_size:wukv_head_dim, :],
+                    wukv_v_local[
+                        :, ib * block_size:(ib + 1) * block_size
+                    ],
+                )
                 T.ppl_clear(acc)
-                T.ppl_gemm(q_nope, weight_dequant, acc)
+                T.ppl_gemm(q_nope, k_weight_block, acc)
                 T.copy(
                     acc,
                     q_abs[:, ib * block_size:(ib + 1) * block_size],
@@ -976,31 +993,20 @@ def paged_latent_attention_fp8_fused_kernel(
             T.ppl_clear(value_acc)
             for ib in T.serial(kv_in_blocks):
                 latent_shared = T.alloc_shared([1, block_size], dtype)
-                weight_fp8 = T.alloc_shared([block_size, block_size], fp8_dtype)
-                weight_bf16 = T.alloc_shared([block_size, block_size], dtype)
-                scale_rows = T.alloc_shared([block_size, 1], dtype)
-                weight_dequant = T.alloc_shared([block_size, block_size], dtype)
+                v_weight_block = T.alloc_shared(
+                    [block_size, block_size], dtype
+                )
                 T.copy(acc_o[:, ib * block_size:(ib + 1) * block_size],
                        latent_shared)
                 T.copy(
-                    wukv[
-                        by * wukv_head_dim + nope_dim:(by + 1) * wukv_head_dim,
-                        ib * block_size:(ib + 1) * block_size,
+                    wukv_v_local[
+                        :, ib * block_size:(ib + 1) * block_size
                     ],
-                    weight_fp8,
+                    v_weight_block,
                 )
-                T.copy(weight_fp8, weight_bf16)
-                T.copy(
-                    wukv_scale_expanded[
-                        by * wukv_head_dim + nope_dim:(by + 1) * wukv_head_dim,
-                        ib:ib + 1,
-                    ],
-                    scale_rows,
-                )
-                T.ppl_mul(weight_dequant, weight_bf16, scale_rows)
                 # Accumulate each input-rank block directly into the final
                 # output accumulator, mirroring the attention GEMM path.
-                T.ppl_gemm(latent_shared, weight_dequant, value_acc,
+                T.ppl_gemm(latent_shared, v_weight_block, value_acc,
                            transpose_B=True)
             T.copy(value_acc, value_out)
             T.copy(value_out, output[:, by:by + 1, :, :])
