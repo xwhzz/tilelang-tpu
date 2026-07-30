@@ -640,6 +640,12 @@ class TLTPUSourceWrapper(object):
         "uint8": 1,
     }
 
+    _SCALAR_TYPE_MAP = {
+        "float32": "float",
+        "int32": "int32_t",
+        "bool": "bool",
+    }
+
     backend = "tl"
     device_mod: Optional[IRModule] = None
     host_mod: Optional[IRModule] = None
@@ -680,9 +686,20 @@ class TLTPUSourceWrapper(object):
                     "type": self._TYPE_MAP[buffer.dtype],
                     "dtype_str": buffer.dtype,
                     "shape": list(buffer.shape),
+                    "kind": "buffer",
+                    "host_type": "unsigned long long",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                dtype = str(param.dtype)
+                if dtype not in self._SCALAR_TYPE_MAP:
+                    raise ValueError(f"Unsupported TPU scalar parameter dtype: {dtype}")
+                function_args.append({
+                    "name": param.name,
+                    "type": self._SCALAR_TYPE_MAP[dtype],
+                    "dtype_str": dtype,
+                    "kind": "scalar",
+                    "host_type": self._SCALAR_TYPE_MAP[dtype],
+                })
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
@@ -704,11 +721,17 @@ class TLTPUSourceWrapper(object):
         param_names = [f"v{i+1}" for i in range(num_params)]
         
         # 结构体成员
-        struct_members = "\n  ".join([f"unsigned long long {name};" for name in param_names])
+        struct_members = "\n  ".join([
+            f"{arg['host_type']} {name};"
+            for arg, name in zip(self.function_args, param_names)
+        ])
         
         # 函数参数
-        func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
-        struct_params = ", ".join([f"unsigned long long {name}" for i, name in enumerate(param_names)])
+        func_params = ", ".join([
+            f"{arg['host_type']} {name}"
+            for arg, name in zip(self.function_args, param_names)
+        ])
+        struct_params = func_params
         
         
         content = template_content.format(
@@ -731,7 +754,10 @@ class TLTPUSourceWrapper(object):
         
         # 生成参数相关的内容
         param_names = [f"v{i+1}" for i in range(num_params)]
-        func_params = ", ".join([f"unsigned long long {name}" for name in param_names])
+        func_params = ", ".join([
+            f"{arg['host_type']} {name}"
+            for arg, name in zip(self.function_args, param_names)
+        ])
         struct_assignments = "\n  ".join([f"api.{name} = {name};" for name in param_names])
         
         # 格式化内容
@@ -759,9 +785,23 @@ class TLTPUSourceWrapper(object):
         memcpy_d2s_statements = []
         free_statements = []
         kernel_call_args = []
+        device_arg_declarations = []
+        device_kernel_call_args = []
         
         for i, arg in enumerate(self.function_args):
             arg_name = arg["name"]
+            if arg["kind"] == "scalar":
+                host_type = arg["host_type"]
+                declaration = (
+                    f'  {host_type} {arg_name} = '
+                    f'*static_cast<{host_type}*>(args[{i}]);'
+                )
+                arg_declarations.append(declaration)
+                device_arg_declarations.append(declaration)
+                kernel_call_args.append(arg_name)
+                device_kernel_call_args.append(arg_name)
+                continue
+
             elem_bytes = self._ELEM_BYTES.get(arg.get("dtype_str", ""), None)
             if elem_bytes is not None:
                 size_suffix = f" * {elem_bytes}"
@@ -771,18 +811,28 @@ class TLTPUSourceWrapper(object):
             
             arg_declarations.append(f'  char* {arg_name} = static_cast<char*>(args[{i}]);')
             arg_declarations.append(f'  size_t {arg_name}_size = {data_size};')
-            device_declarations.append(f'  void *dev_{arg_name};')
-            malloc_statements.append(f'  tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')
-            memcpy_s2d_statements.append(f'  tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size);')
+            device_declarations.append(f'  void *dev_{arg_name} = nullptr;')
+            malloc_statements.append(
+                f'  if ({arg_name} != nullptr) '
+                f'tpuRtMalloc((void **)(&dev_{arg_name}), {arg_name}_size, 0);')
+            memcpy_s2d_statements.append(
+                f'  if ({arg_name} != nullptr) '
+                f'tpuRtMemcpyS2D(dev_{arg_name}, {arg_name}, {arg_name}_size);')
             
             if i in self.output_indices:
-                memcpy_d2s_statements.append(f'  tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size);')
+                memcpy_d2s_statements.append(
+                    f'  if ({arg_name} != nullptr) '
+                    f'tpuRtMemcpyD2S({arg_name}, dev_{arg_name}, {arg_name}_size);')
             
-            free_statements.append(f'  tpuRtFree(&dev_{arg_name}, 0);')
+            free_statements.append(
+                f'  if (dev_{arg_name} != nullptr) tpuRtFree(&dev_{arg_name}, 0);')
             kernel_call_args.append(f'(unsigned long long)dev_{arg_name}')
+            device_kernel_call_args.append(f'(unsigned long long)args[{i}]')
         
         kernel_call = f'  int rst = {function_name}({", ".join(kernel_call_args)});'
         pure_kernel_call = f'  rst = {function_name}({", ".join(kernel_call_args)});'
+        device_kernel_call = (
+            f'  int rst = {function_name}({", ".join(device_kernel_call_args)});')
         
         # 格式化内容
         formatted_content = template_content.format(
@@ -793,7 +843,9 @@ class TLTPUSourceWrapper(object):
             memcpy_d2s_statements="\n".join(memcpy_d2s_statements),
             free_statements="\n".join(free_statements),
             kernel_call=kernel_call,
-            pure_kernel_call=pure_kernel_call
+            pure_kernel_call=pure_kernel_call,
+            device_arg_declarations="\n".join(device_arg_declarations),
+            device_kernel_call=device_kernel_call,
         )
         
         if output_file is None:
