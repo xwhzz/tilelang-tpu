@@ -20,7 +20,7 @@
 /*!
  * \file target/codegen.cc
  */
-
+#include <cstdlib>
 #include "codegen_ppl.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/runtime/registry.h>
@@ -100,22 +100,58 @@ std::string CodeGenTileLangPPL::Finish() {
   return CodeGenC::Finish();
   }
 
-/* no need to change */
 void CodeGenTileLangPPL::VisitStmt_(const tir::ForNode *op) {
 
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
     stream << "#pragma unroll\n";
   }
+
   std::string extent =
       PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
+
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
   std::string start = PrintExpr(op->min);
+
+  const char* core_parallel_env = std::getenv("TL_TPU_ENABLE_CORE_PARALLEL");
+  bool enable_core_parallel =
+      core_parallel_env != nullptr && std::string(core_parallel_env) == "1";
+
+  bool has_tpu_core_parallel_annotation =
+      op->annotations.count("tilelang.tpu_core_parallel") != 0;
+
+  if (enable_core_parallel && has_tpu_core_parallel_annotation && start == "0") {
+    std::string core_idx_var = vid + "_core_idx";
+    std::string core_num_var = vid + "_core_num";
+
+    stream << "int " << core_idx_var << " = tpu_workitem_index();\n";
+
+    PrintIndent();
+    stream << "int " << core_num_var << " = tpu_workitem_num();\n";
+
+    PrintIndent();
+    stream << "if (" << core_num_var << " <= 0) " << core_num_var << " = 1;\n";
+
+    PrintIndent();
+    stream << "for (";
+    PrintType(op->loop_var.dtype(), stream);
+    stream << ' ' << vid << " = " << core_idx_var << "; " << vid << " < " << extent
+           << "; " << vid << " += " << core_num_var << ") {\n";
+
+    int for_scope = BeginScope();
+    PrintStmt(op->body);
+    this->EndScope(for_scope);
+    PrintIndent();
+    stream << "}\n";
+    return;
+  }
+
   stream << "for (";
   PrintType(op->loop_var.dtype(), stream);
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
          << "; ++" << vid << ") {\n";
+
   int for_scope = BeginScope();
   PrintStmt(op->body);
   this->EndScope(for_scope);
@@ -720,6 +756,50 @@ inline std::string vector2string(const std::vector<int> &vec) {
   return ret;
 }
 
+static inline std::string TargetDTypeName(DataType dtype) {
+  if (dtype == DataType::Float(32)) {
+    return "DT_FP32";
+  } else if (dtype == DataType::Float(16)) {
+    return "DT_FP16";
+  } else if (dtype == DataType::BFloat(16)) {
+    return "DT_BFP16";
+  } else if (dtype.is_e5m2_float8()) {
+    return "DT_FP8E5M2";
+  } else if (dtype.is_e4m3_float8()) {
+    return "DT_FP8E4M3";
+  } else if (dtype == DataType::UInt(32)) {
+    return "DT_UINT32";
+  } else if (dtype == DataType::Int(32)) {
+    return "DT_INT32";
+  } else if (dtype == DataType::UInt(16)) {
+    return "DT_UINT16";
+  } else if (dtype == DataType::Int(16)) {
+    return "DT_INT16";
+  } else if (dtype == DataType::UInt(8)) {
+    return "DT_UINT8";
+  } else if (dtype == DataType::Int(8)) {
+    return "DT_INT8";
+  }
+  LOG(FATAL) << "Unsupported dtype " << dtype;
+  return "DT_FP32";
+}
+
+static inline int TargetDTypeBytes(DataType dtype) {
+  if (dtype == DataType::Float(32) || dtype == DataType::UInt(32) ||
+      dtype == DataType::Int(32)) {
+    return 4;
+  } else if (dtype == DataType::Float(16) ||
+             dtype == DataType::BFloat(16) ||
+             dtype == DataType::UInt(16) || dtype == DataType::Int(16)) {
+    return 2;
+  } else if (dtype.is_e5m2_float8() || dtype.is_e4m3_float8() ||
+             dtype == DataType::UInt(8) || dtype == DataType::Int(8)) {
+    return 1;
+  }
+  LOG(FATAL) << "Unsupported dtype " << dtype;
+  return 0;
+}
+
 static inline const char* AsBDTypeStr(const DataType& dtype_) {
   if (dtype_ == DataType::Float(32)) {
     return "DT_FP32";
@@ -727,8 +807,10 @@ static inline const char* AsBDTypeStr(const DataType& dtype_) {
     return "DT_FP16";
   } else if (dtype_ == DataType::BFloat(16)) {
     return "DT_BFP16";
-  } else if (dtype_ == DataType::Int(8)) {
-    return "DT_INT8";
+  } else if (dtype_.is_e5m2_float8()) {
+    return "DT_FP8E5M2";
+  } else if (dtype_.is_e4m3_float8()) {
+    return "DT_FP8E4M3";
   }
 
   // 其它类型回退为FP32
@@ -742,20 +824,55 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                                const std::string &src0, const std::string &src1,
                                const std::string &dtype) -> std::stringstream {
     std::stringstream src1_stride;
-    if (src1_shape[1] == 1 && src0_shape[1] != 1) {
+
+    if (src0_shape.size() < 2 || src1_shape.size() < 2) {
+      src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
+                  << ".stride), ";
+      return src1_stride;
+    }
+
+    bool dim0_equal = src1_shape[0] == src0_shape[0];
+    bool dim1_equal = src1_shape[1] == src0_shape[1];
+
+    bool dim0_broadcast = src1_shape[0] == 1 && src0_shape[0] != 1;
+    bool dim1_broadcast = src1_shape[1] == 1 && src0_shape[1] != 1;
+
+    bool dim0_ok = dim0_equal || dim0_broadcast;
+    bool dim1_ok = dim1_equal || dim1_broadcast;
+
+    if (!dim0_ok || !dim1_ok) {
+      LOG(FATAL) << "Unsupported elementwise broadcast: src0 shape ["
+                 << src0_shape[0] << ", " << src0_shape[1]
+                 << "], src1 shape [" << src1_shape[0] << ", "
+                 << src1_shape[1] << "]";
+    }
+
+    if (dim0_broadcast || dim1_broadcast) {
       std::string stride_var = name_supply_->FreshName(src1 + "_stride");
+
       this->PrintIndent();
       this->stream << "dim4 " << stride_var << ";\n";
+
       this->PrintIndent();
       this->stream << "tpu_aligned_stride(&" << stride_var << ", 0, &" << src1
                    << ".shape, " << dtype << ");\n";
-      this->PrintIndent();
-      this->stream << stride_var << ".w = 0;\n";
+
+      if (dim0_broadcast) {
+        this->PrintIndent();
+        this->stream << stride_var << ".c = 0;\n";
+      }
+
+      if (dim1_broadcast) {
+        this->PrintIndent();
+        this->stream << stride_var << ".w = 0;\n";
+      }
+
       src1_stride << "&" << stride_var << ", ";
-    } else if (src1_shape[1] == src0_shape[1]) {
+    } else {
       src1_stride << "(" << src1 << ".default_stride ? NULL : &" << src1
                   << ".stride), ";
     }
+
     return src1_stride;
   };
 
@@ -767,14 +884,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto src0_shape = buffer_shape[src0];
     auto src1_shape = buffer_shape[src1];
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
-    std::string dtype;
-    if (dtype_ == DataType::Float(16)) {
-      dtype = "DT_FP16";
-    } else if (dtype_ == DataType::Float(32)) {
-      dtype = "DT_FP32";
-    } else if (dtype_ == DataType::BFloat(16)){
-      dtype = "DT_BFP16";
-    }
+    std::string dtype = TargetDTypeName(dtype_);
     if (!has_dtype) {
       dtype = "";
     }
@@ -842,6 +952,10 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           -> std::tuple<std::string, std::string, std::string> {
         auto src_buffer = src.GetBuffer();
         auto src_ranges = src.GetRanges();
+        auto is_local_tensor_scope = [](const std::string &scope) {
+          return scope == "shared.dyn" || scope == "local" ||
+                 scope == "local.fragment";
+        };
 
         auto src_id = var_idmap_[src_buffer->data.get()];
         if (src_id.empty()) {
@@ -867,38 +981,8 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           }
           src_shape[src_shape.size() - 2] = '}';
         }
-        std::string dtype;
-        int bytes_size = 0;
-        if (src_buffer->dtype == DataType::Float(16)) {
-          dtype = "DT_FP16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::BFloat(16)) {
-          dtype = "DT_BFP16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::Float(32)) {
-          dtype = "DT_FP32";
-          bytes_size = 4;
-        } else if (src_buffer->dtype == DataType::UInt(32)){
-          dtype = "DT_UINT32";
-          bytes_size = 4;
-        }else if (src_buffer->dtype == DataType::Int(32)){
-          dtype = "DT_INT32";
-          bytes_size = 4;
-        } else if (src_buffer->dtype == DataType::UInt(8)){
-          dtype = "DT_UINT8";
-          bytes_size = 1;
-        } else if (src_buffer->dtype == DataType::Int(8)){
-          dtype = "DT_INT8";
-          bytes_size = 1;
-        } else if (src_buffer->dtype == DataType::UInt(16)){
-          dtype = "DT_UINT16";
-          bytes_size = 2;
-        } else if (src_buffer->dtype == DataType::Int(16)){
-          dtype = "DT_INT16";
-          bytes_size = 2;
-        } else {
-          LOG(FATAL) << "Unsupported dtype " << src_buffer->dtype;
-        }
+        std::string dtype = TargetDTypeName(src_buffer->dtype);
+        int bytes_size = TargetDTypeBytes(src_buffer->dtype);
         if (src_buffer.scope() == "global") {
           std::string src_strides;
 
@@ -938,18 +1022,50 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                          ".addr + " + min_expr + ", .dtype = " + dtype +
                          ", .mode = 2, .size = 1, .offset = " + min_expr +
                          ", .unsigned_flag = 0, .default_stride = false};\n");
-        } else if (src_buffer.scope() == "shared.dyn") {
+        } else if (is_local_tensor_scope(src_buffer.scope())) {
 
           auto parent_var = var_idmap_[src_buffer->data.get()];
+          std::string min_expr;
+          std::vector<std::string> strides = {
+              parent_var + ".stride.n", parent_var + ".stride.c",
+              parent_var + ".stride.h", parent_var + ".stride.w"};
+          std::vector<int> stride_idx;
+          if (src_ranges.size() == 4) {
+            stride_idx = {0, 1, 2, 3};
+          } else if (src_ranges.size() == 3) {
+            stride_idx = {1, 2, 3};
+          } else if (src_ranges.size() == 2) {
+            stride_idx = {1, 3};
+          } else {
+            LOG(FATAL) << "Unsupported region dims: " << src_ranges.size();
+          }
+          for (int i = 0; i < src_ranges.size(); i++) {
+            auto sr = src_ranges[i];
+            const PrimExpr &e = sr->min;
+            std::string idx_str;
+            if (const RampNode* ramp = e.as<RampNode>()) {
+              idx_str = PrintExpr(ramp->base);
+            } else {
+              idx_str = PrintExpr(e);
+            }
+            min_expr += "(" + idx_str + ") * " + strides[stride_idx[i]] + "+";
+          }
+          min_expr[min_expr.size() - 1] = ' ';
+          min_expr = "(" + min_expr + ")" + " * " + std::to_string(bytes_size);
           inst.push_back("__ppl_tensor_info " + new_src_var + " = {.shape = " +
                          src_shape + ", .stride = " + parent_var +
                          ".stride, .addr = " + parent_var +
-                         ".addr, .dtype = " + dtype +
-                         ", .mode = 0, .size = 1, .offset = 0, "
+                         ".addr + " + min_expr + ", .dtype = " + dtype +
+                         ", .mode = 0, .size = 1, .offset = " + min_expr + ", "
                          ".unsigned_flag = 0, .default_stride = " + parent_var +
                          ".default_stride};\n");
+        } else {
+          LOG(FATAL) << "Unsupported ppl.copy buffer scope: "
+                     << src_buffer.scope();
         }
-        return std::make_tuple(new_src_var, src_buffer.scope(), dtype);
+        return std::make_tuple(new_src_var,
+                               src_buffer.scope() == "global" ? "global" : "local",
+                               dtype);
       };
       tvm::Dump(op);
       tl::RegionOp src =
@@ -978,9 +1094,9 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
           this->stream << i;
         }
       } else {
-        if (src_flag == "global" && dst_flag == "shared.dyn") {
+        if (src_flag == "global" && dst_flag == "local") {
           ppl_inst += "tpu_gdma_cpy_S2L";
-        } else if (src_flag == "shared.dyn" && dst_flag == "global") {
+        } else if (src_flag == "local" && dst_flag == "global") {
           ppl_inst += "tpu_gdma_cpy_L2S";
         } else {
           // local mem -> local mem copy within the same NPU
@@ -1081,16 +1197,36 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
                      << left_right_dtype << ");\n";
     } else if (op_name == "ppl.sub") {
       handle_elementwise("tpu_bdc_fp_sub", true);
+    } else if (op_name == "ppl.npu_bcast") {
+      auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
+      auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
+
+      auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
+      std::string dtype;
+      if (dtype_ == DataType::Float(16)) {
+        dtype = "DT_FP16";
+      } else if (dtype_ == DataType::Float(32)) {
+        dtype = "DT_FP32";
+      } else if (dtype_ == DataType::BFloat(16)) {
+        dtype = "DT_BFP16";
+      } else {
+        LOG(FATAL) << "Unsupported dtype in ppl.npu_bcast: " << dtype_;
+      }
+
+      this->PrintIndent();
+      this->stream << "if (" << src0 << ".size) {\n";
+      this->PrintIndent();
+      this->stream << "  tpu_bdc_npu_bcast(" << dst << ".addr, "
+                   << src0 << ".addr, &" << dst << ".shape, "
+                   << dtype << ");\n";
+      this->PrintIndent();
+      this->stream << "}\n";    
     } else if (op_name == "ppl.mul") {
       handle_elementwise("tpu_bdc_fp_mul", true);
     } else if (op_name == "ppl.add") {
       handle_elementwise("tpu_bdc_fp_add", true);
     } else if (op_name == "ppl.div") {
       handle_elementwise("tpu_bdc_fp_div", true);
-    } else if (op_name == "ppl.min") {
-      handle_elementwise("tpu_bdc_fp_min", true);
-    } else if (op_name == "ppl.max") {
-      handle_elementwise("tpu_bdc_fp_max", true);
     } else if (op_name == "ppl.mul_C") {
       handle_elementwise_const("tpu_bdc_fp_mul_C");
     } else if (op_name == "ppl.add_C") {
@@ -1839,31 +1975,16 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   bv_shape += ", 1, ";
   bv_shape += std::to_string(buffer_shape[2].as<IntImmNode>()->value);
   bv_shape += "}";
-  std::string op_dtype;
-  int bytes_size = 0;
-  if (op->dtype == DataType::Float(16)) {
-    op_dtype = "DT_FP16";
-    bytes_size = 2;
-  } else if (op->dtype == DataType::Float(32)) {
-    op_dtype = "DT_FP32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::BFloat(16)){
-    op_dtype = "DT_BFP16";
-    bytes_size = 2;
-  } else if (op->dtype == DataType::UInt(32)){
-    op_dtype = "DT_UINT32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::Int(32)){
-    op_dtype = "DT_INT32";
-    bytes_size = 4;
-  } else if (op->dtype == DataType::Int(8)){
-    op_dtype = "DT_INT8";
-    bytes_size = 1;
-  }
+  std::string op_dtype = TargetDTypeName(op->dtype);
+  int bytes_size = TargetDTypeBytes(op->dtype);
   auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
   for (size_t iter{0}; iter < buffer_num; iter++) {
     this->PrintIndent();
-    int tensor_size = shapes[0] * shapes[1] / lane_num * bytes_size;
+    int numel = shapes[0] * shapes[1];
+    int tensor_size = (numel * bytes_size + lane_num - 1) / lane_num;
+    if (tensor_size <= 0) {
+      tensor_size = 1;
+    }
     auto addr =
         f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)).as<IntImmNode>()->value;
     buffer_addrs_[buffer_var] = addr;
@@ -2063,28 +2184,8 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     }
 
     shape_s += "}";
-    std::string dtype;
-    int bytes_size = 0;
-
-    if (buffer_node->dtype == DataType::Float(16)) {
-      dtype = "DT_FP16";
-      bytes_size = 2;
-    } else if (buffer_node->dtype == DataType::Float(32)) {
-      dtype = "DT_FP32";
-      bytes_size = 4;
-    } else if (buffer_node->dtype == DataType::BFloat(16)){
-      dtype = "DT_BFP16";
-      bytes_size = 2;
-    } else if (buffer_node->dtype == DataType::UInt(32)){
-      dtype = "DT_UINT32";
-      bytes_size = 4;
-    } else if (buffer_node->dtype == DataType::Int(32)){
-      dtype = "DT_INT32";
-      bytes_size = 4;
-    } else if (buffer_node->dtype == DataType::Int(8)){
-      dtype = "DT_INT8";
-      bytes_size = 1;
-    }
+    std::string dtype = TargetDTypeName(buffer_node->dtype);
+    int bytes_size = TargetDTypeBytes(buffer_node->dtype);
     tensor_size *= bytes_size;
     std::string inst =
         "__ppl_tensor_info " + rid + " = {.shape = " + shape_s +

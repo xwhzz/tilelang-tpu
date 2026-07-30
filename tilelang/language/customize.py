@@ -293,6 +293,16 @@ def ppl_mul(out, inp1, inp2):
     inpptr2 = inp2.access_ptr("r")
     return T.call_extern("handle", "ppl.mul", outptr, inpptr1, inpptr2)
 
+def ppl_npu_bcast(out, inp):
+    """Broadcast one NPU lane/value across the output local tile.
+
+    This lowers to TPU `tpu_bdc_npu_bcast` and is intended for cases like:
+      scale_group_shared:  (1, 1)
+      scale_kgroup_shared: (128, 1)
+    """
+    outptr = out.access_ptr("w")
+    inpptr = inp.access_ptr("r")
+    return T.call_extern("handle", "ppl.npu_bcast", outptr, inpptr)
 
 @T.macro
 def ppl_exp2(out, work0, work1, coeff, table):  # only support FP32

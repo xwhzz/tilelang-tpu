@@ -1,11 +1,13 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-
+import os
+from contextlib import contextmanager
 from typing import List, Union, Any, Callable, Literal, Optional, Dict
 from tvm.target import Target
 import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
+from tvm import tir
 
 from tilelang.jit.adapter import (
     TorchDLPackKernelAdapter,
@@ -16,6 +18,197 @@ from tilelang.jit.adapter import (
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.engine.param import KernelParam, CompiledArtifact
+
+
+def _normalize_tpu_core_parallel(config):
+    """Normalize TPU core-parallel compile option.
+
+    Supported forms:
+      None  -> disabled
+      bool  -> enable/disable with default loop/core_num
+      dict  -> {"enable": True, "loop": "by", "core_num": 8}
+            or {"enable": True, "core_num": "auto", "max_core_num": 8}
+    """
+    if config is None:
+        return {
+            "enable": False,
+            "loop": "by",
+            "core_num": 8,
+            "max_core_num": 8,
+        }
+
+    if isinstance(config, bool):
+        return {
+            "enable": config,
+            "loop": "by",
+            "core_num": 8,
+            "max_core_num": 8,
+        }
+
+    if isinstance(config, dict):
+        core_num = config.get("core_num", 8)
+
+        if isinstance(core_num, str):
+            if core_num != "auto":
+                raise ValueError(
+                    'tpu_core_parallel["core_num"] string only supports "auto"'
+                )
+        else:
+            core_num = int(core_num)
+
+        normalized = {
+            "enable": bool(config.get("enable", True)),
+            "loop": str(config.get("loop", "by")),
+            "core_num": core_num,
+            "max_core_num": int(config.get("max_core_num", 8)),
+        }
+
+        if "_resolved_core_num" in config:
+            normalized["_resolved_core_num"] = int(config["_resolved_core_num"])
+
+        return normalized
+
+    raise TypeError(
+        "tpu_core_parallel must be None, bool, or dict, "
+        'e.g. {"enable": True, "loop": "by", "core_num": 8}'
+    )
+
+def _try_get_static_int(value):
+    """Best-effort conversion from a TIR expression to a Python int."""
+    if value is None:
+        return None
+
+    if isinstance(value, int):
+        return int(value)
+
+    try:
+        analyzer = tvm.arith.Analyzer()
+        value = analyzer.simplify(value)
+    except Exception:
+        pass
+
+    if isinstance(value, tir.IntImm):
+        return int(value.value)
+
+    if hasattr(value, "value"):
+        try:
+            return int(value.value)
+        except Exception:
+            return None
+
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _has_tpu_core_parallel_annotation(for_node):
+    """Check whether a TIR For node is marked as TPU core-parallel."""
+    annotations = getattr(for_node, "annotations", None)
+    if annotations is None:
+        return False
+
+    try:
+        if "tilelang.tpu_core_parallel" in annotations:
+            return True
+    except Exception:
+        pass
+
+    try:
+        for key in annotations.keys():
+            if str(key) == "tilelang.tpu_core_parallel":
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _infer_tpu_core_num_from_tir(func, max_core_num=8):
+    """Infer TPU core number from the annotated parallel loop extent.
+
+    Short-term rule:
+      core_num = min(max_core_num, parallel_loop_extent)
+
+    This version only targets static loop extents, such as:
+      for m_blk in T.serial(T.ceildiv(M, block_M),
+                            annotations={"tilelang.tpu_core_parallel": True})
+    """
+    inferred_extent = None
+
+    def visit(stmt):
+        nonlocal inferred_extent
+
+        if inferred_extent is not None:
+            return
+
+        if isinstance(stmt, tir.For) and _has_tpu_core_parallel_annotation(stmt):
+            extent = _try_get_static_int(stmt.extent)
+            if extent is not None and extent > 0:
+                inferred_extent = extent
+
+    try:
+        if isinstance(func, tir.PrimFunc):
+            tir.stmt_functor.post_order_visit(func.body, visit)
+        elif isinstance(func, tvm.IRModule):
+            for _, prim_func in func.functions.items():
+                if isinstance(prim_func, tir.PrimFunc):
+                    tir.stmt_functor.post_order_visit(prim_func.body, visit)
+                    if inferred_extent is not None:
+                        break
+        elif hasattr(func, "body"):
+            tir.stmt_functor.post_order_visit(func.body, visit)
+    except Exception:
+        inferred_extent = None
+
+    if inferred_extent is None:
+        return int(max_core_num)
+
+    return max(1, min(int(max_core_num), int(inferred_extent)))
+
+@contextmanager
+def _temporary_tpu_core_parallel_env(config):
+    """Temporarily map compile option to environment variables.
+
+    The current TPU PPL codegen and host template still read:
+      TL_TPU_ENABLE_CORE_PARALLEL
+      TL_TPU_CORE_PARALLEL_LOOP
+      TL_TPU_CORE_NUM
+
+    This context manager allows tilelang.compile(...) to control them
+    without requiring users to export shell environment variables manually.
+    """
+    config = _normalize_tpu_core_parallel(config)
+
+    keys = [
+        "TL_TPU_ENABLE_CORE_PARALLEL",
+        "TL_TPU_CORE_PARALLEL_LOOP",
+        "TL_TPU_CORE_NUM",
+    ]
+    old_values = {key: os.environ.get(key) for key in keys}
+
+    try:
+        if config["enable"]:
+            os.environ["TL_TPU_ENABLE_CORE_PARALLEL"] = "1"
+            os.environ["TL_TPU_CORE_PARALLEL_LOOP"] = config["loop"]
+
+            core_num = config.get("_resolved_core_num", config.get("core_num", 8))
+            if core_num == "auto":
+                core_num = config.get("max_core_num", 8)
+
+            os.environ["TL_TPU_CORE_NUM"] = str(int(core_num))
+        else:
+            os.environ.pop("TL_TPU_ENABLE_CORE_PARALLEL", None)
+            os.environ.pop("TL_TPU_CORE_PARALLEL_LOOP", None)
+            os.environ.pop("TL_TPU_CORE_NUM", None)
+
+        yield
+    finally:
+        for key, value in old_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 class JITKernel(object):
@@ -47,6 +240,9 @@ class JITKernel(object):
         pass_configs: Optional[Dict[str, Any]] = None,
         from_database: bool = False,
         mode: Literal["pcie", "cmodel"] = "pcie",
+        tpu_core_parallel: Optional[Union[bool, Dict[str, Any]]] = None,
+        tpu_device_id: Optional[int] = None,
+        tpu_runtime_root: Optional[str] = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -82,7 +278,23 @@ class JITKernel(object):
             pass_configs = {}
         self.pass_configs = pass_configs
         self.mode = mode
+        self.tpu_core_parallel = _normalize_tpu_core_parallel(tpu_core_parallel)
 
+        if (
+            self.tpu_core_parallel["enable"]
+            and self.tpu_core_parallel["core_num"] == "auto"
+        ):
+            self.tpu_core_parallel["_resolved_core_num"] = _infer_tpu_core_num_from_tir(
+                func,
+                max_core_num=self.tpu_core_parallel["max_core_num"],
+            )
+
+        if tpu_device_id is None:
+            tpu_device_id = int(os.environ.get("TL_TPU_DEVICE_ID", "0"))
+        if tpu_device_id < 0:
+            raise ValueError("tpu_device_id must be non-negative")
+        self.tpu_device_id = int(tpu_device_id)
+        self.tpu_runtime_root = tpu_runtime_root
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
             assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
@@ -133,6 +345,9 @@ class JITKernel(object):
         execution_backend: Literal["dlpack", "ctypes", "cython"],
         pass_configs: Optional[Dict[str, Any]] = None,
         mode: Literal["pcie", "cmodel"] = "pcie",
+        tpu_core_parallel: Optional[Union[bool, Dict[str, Any]]] = None,
+        tpu_device_id: Optional[int] = None,
+        tpu_runtime_root: Optional[str] = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -146,6 +361,9 @@ class JITKernel(object):
             pass_configs=pass_configs,
             from_database=True,
             mode=mode,
+            tpu_core_parallel=tpu_core_parallel,
+            tpu_device_id=tpu_device_id,
+            tpu_runtime_root=tpu_runtime_root,
         )
 
         instance.adapter = instance._create_adapter_from_database(
@@ -204,13 +422,14 @@ class JITKernel(object):
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs):
-            artifact = tilelang.lower(
-                tilelang_func,
-                target=target,
-                target_host=target_host,
-                enable_host_codegen=enable_host_codegen,
-                enable_device_compile=enable_device_compile)
+        with _temporary_tpu_core_parallel_env(self.tpu_core_parallel):
+            with tvm.transform.PassContext(opt_level=3, config=pass_configs):
+                artifact = tilelang.lower(
+                    tilelang_func,
+                    target=target,
+                    target_host=target_host,
+                    enable_host_codegen=enable_host_codegen,
+                    enable_device_compile=enable_device_compile)
 
         self.artifact = artifact
 
@@ -246,6 +465,9 @@ class JITKernel(object):
                 verbose=verbose,
                 pass_configs=pass_configs,
                 mode=mode,
+                tpu_core_parallel=self.tpu_core_parallel,
+                tpu_device_id=self.tpu_device_id,
+                tpu_runtime_root=self.tpu_runtime_root,
             )
         else:
             # Handle invalid backend.
