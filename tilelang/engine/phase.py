@@ -19,7 +19,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.FrontendLegalize()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
-    print(mod)
     # Infer memory layouts for fragments and shared memory
     # mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
@@ -31,8 +30,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
-    # Try to vectorize loop with dynamic shape
-    # mod = tilelang.transform.LoopVectorizeDynamic()(mod)
+    # LoopVectorizeDynamic is disabled for now: it can segfault on
+    # symbolic local-memory regions without vectorization guards.
 
     return mod
 

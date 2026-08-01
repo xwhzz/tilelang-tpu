@@ -243,6 +243,7 @@ class JITKernel(object):
                 host_mod=artifact.host_mod,
                 device_mod=artifact.device_mod,
                 kernel_global_source=artifact.kernel_source,
+                optimized_mod=artifact.optimized_mod,
                 verbose=verbose,
                 pass_configs=pass_configs,
                 mode=mode,

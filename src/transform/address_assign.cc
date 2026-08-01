@@ -31,6 +31,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/function.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
@@ -40,7 +41,6 @@
 #include <limits>
 #include <list>
 #include <memory>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -111,6 +111,42 @@ bool LiveRangesOverlap(const OpAddr &lhs, const OpAddr &rhs) {
   return std::max(lhs.first_pos, rhs.first_pos) <
          std::min(lhs.end_pos, rhs.end_pos);
 }
+
+static PrimExpr Int64Imm(int64_t value) {
+  return make_const(DataType::Int(64), value);
+}
+
+static PrimExpr ToInt64(const PrimExpr &expr) {
+  if (expr.dtype() == DataType::Int(64)) {
+    return expr;
+  }
+  return Cast(DataType::Int(64), expr);
+}
+
+static PrimExpr AlignUpExpr(const PrimExpr &expr, int64_t align,
+                            arith::Analyzer *analyzer) {
+  PrimExpr align_expr = Int64Imm(align);
+  PrimExpr one = Int64Imm(1);
+  PrimExpr aligned =
+      floordiv(ToInt64(expr) + align_expr - one, align_expr) * align_expr;
+  return analyzer->Simplify(aligned);
+}
+
+static PrimExpr BufferSizeBytesExpr(const BufferNode *buffer,
+                                    arith::Analyzer *analyzer) {
+  PrimExpr elem_count = Int64Imm(1);
+  for (const PrimExpr &dim : buffer->shape) {
+    elem_count = elem_count * ToInt64(dim);
+  }
+  PrimExpr size_bytes = elem_count * Int64Imm(buffer->dtype.bytes());
+  size_bytes = max(size_bytes, Int64Imm(64));
+  return AlignUpExpr(analyzer->Simplify(size_bytes), 64, analyzer);
+}
+
+struct SymbolicBufferInfo {
+  const BufferNode *buffer;
+  PrimExpr aligned_size;
+};
 
 class MemAllocBankConflictAware {
 public:
@@ -185,7 +221,6 @@ public:
         return false;
       }
       insertAddr(best_addr);
-      // addrMap.Set(op, best_addr->start);
       addrMap[op] = best_addr->start;
     }
     totalSize = total_consumption_;
@@ -589,42 +624,68 @@ private:
 PrimFunc InferAddress(PrimFunc f) {
   int bank_num = bm1690::kBankNum;
   int bank_size = bm1690::kBankSize;
-  std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
-      bank_conflict_map;
-  std::unordered_map<const BufferNode *, TensorLive> live_ranges;
   std::vector<const BufferNode *> alloc_ops =
       AddressAllocator().collectAllocOp(f->body);
 
+  arith::Analyzer analyzer;
+  std::unordered_map<const BufferNode *, std::unordered_set<const BufferNode *>>
+      bank_conflict_map;
+  std::unordered_map<const BufferNode *, TensorLive> live_ranges;
+  std::vector<const BufferNode *> static_ops;
+  std::vector<SymbolicBufferInfo> symbolic_buffers;
+
   for (auto &op : alloc_ops) {
-    TensorLive live;
-    live.tensor_size =
-        bm1690::TpuAlignSizeBytes(op->shape, op->dtype, "AddressAssign");
-    live_ranges[op] = live;
+    PrimExpr aligned_size = BufferSizeBytesExpr(op, &analyzer);
+    if (auto *imm = aligned_size.as<IntImmNode>()) {
+      ICHECK_GE(imm->value, 0)
+          << "AddressAssign inferred a negative buffer size for " << op->name;
+      ICHECK_LE(static_cast<uint64_t>(imm->value),
+                static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
+          << "AddressAssign static buffer size overflows uint32_t for "
+          << op->name;
+      static_ops.push_back(op);
+      TensorLive live;
+      live.tensor_size = static_cast<uint32_t>(imm->value);
+      live_ranges[op] = live;
+    } else {
+      symbolic_buffers.push_back({op, aligned_size});
+    }
   }
-  BufferUseCollector(alloc_ops, &live_ranges, &bank_conflict_map)
+
+  BufferUseCollector(static_ops, &live_ranges, &bank_conflict_map)
       .Analyze(f->body);
 
   std::unordered_map<const BufferNode *, int64_t> addrMapWithBC;
   int64_t memUsedWithBC = 0;
   MemAllocBankConflictAware allocatorBC(bank_num, bank_size);
   auto success = allocatorBC.assignAddr(
-      alloc_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
-  ICHECK(success) << "BM1690 local memory allocation failed. buffers="
-                  << alloc_ops.size() << ", lmem=" << bank_num * bank_size
+      static_ops, live_ranges, bank_conflict_map, addrMapWithBC, memUsedWithBC);
+  ICHECK(success) << "BM1690 local memory allocation failed. static buffers="
+                  << static_ops.size() << ", lmem=" << bank_num * bank_size
                   << " bytes";
 
-  if (success) {
-    // std::unordered_map<String, PrimExpr> result;
-    auto fn = f.CopyOnWrite();
-    auto fn_attr = fn->attrs.CopyOnWrite();
-    for (auto op : alloc_ops) {
-      int64_t address = addrMapWithBC[op];
-      fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
-    }
+  auto fn = f.CopyOnWrite();
+  auto fn_attr = fn->attrs.CopyOnWrite();
+  for (auto op : static_ops) {
+    int64_t address = addrMapWithBC[op];
+    fn_attr->dict.Set(op->name, IntImm(DataType::Int(64), address));
   }
+
+  PrimExpr symbolic_cursor =
+      Int64Imm(AlignUp(memUsedWithBC, 64));
+  for (const SymbolicBufferInfo &info : symbolic_buffers) {
+    PrimExpr addr = analyzer.Simplify(symbolic_cursor);
+    fn_attr->dict.Set(info.buffer->name, addr);
+    symbolic_cursor =
+        AlignUpExpr(analyzer.Simplify(symbolic_cursor + info.aligned_size), 64,
+                    &analyzer);
+  }
+  fn_attr->dict.Set("tl_lm_total_used", analyzer.Simplify(symbolic_cursor));
+
   std::cerr << "[AddressAssign] success=" << std::boolalpha << success
-            << " buffers=" << alloc_ops.size() << " total=" << memUsedWithBC
-            << " bytes\n";
+            << " static=" << static_ops.size()
+            << " symbolic=" << symbolic_buffers.size()
+            << " total=" << memUsedWithBC << " bytes\n";
 
   return f;
 }
