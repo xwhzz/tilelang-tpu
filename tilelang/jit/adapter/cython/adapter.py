@@ -214,26 +214,79 @@ class CythonKernelAdapter(BaseKernelAdapter):
         if is_tpu_target(self.target):
             self.lib.tilelang_tpu_run.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
             self.lib.tilelang_tpu_run.restype = ctypes.c_int
+            self.lib.tilelang_tpu_run_device.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+            self.lib.tilelang_tpu_run_device.restype = ctypes.c_int
+            self.lib.tilelang_tpu_set_device.argtypes = [ctypes.c_int]
+            self.lib.tilelang_tpu_set_device.restype = ctypes.c_int
+            self.lib.tilelang_tpu_synchronize.argtypes = []
+            self.lib.tilelang_tpu_synchronize.restype = ctypes.c_int
             # TODO: 暂时使用ctypes，后续考虑更高效cython
+            def scalar_buffer(value):
+                if isinstance(value, bool):
+                    return ctypes.c_bool(value)
+                if isinstance(value, int):
+                    return ctypes.c_int32(value)
+                if isinstance(value, float):
+                    return ctypes.c_float(value)
+                raise TypeError(f"Unsupported TPU scalar argument: {type(value).__name__}")
+
             def lambda_forward(*args):
-                host_tensors = [arg.detach().cpu().contiguous() for arg in args]
-                arg_buffers = []
-                arg_sizes = []
-                for tensor in host_tensors:
-                    storage = tensor.untyped_storage()
-                    nbytes = storage.nbytes()
-                    raw = bytes(storage)
-                    buf = ctypes.create_string_buffer(raw, nbytes)
-                    arg_buffers.append(buf)
-                    arg_sizes.append(nbytes)
+                tensor_args = [arg for arg in args if isinstance(arg, torch.Tensor)]
+                tensor_devices = {arg.device for arg in tensor_args}
+                if self.mode == "pcie" and len(tensor_devices) > 1:
+                    raise ValueError("All TPU kernel tensors must be on the same device")
+                direct_device_call = (
+                    self.mode == "pcie"
+                    and tensor_args
+                    and all(arg.device.type == "tpu" for arg in tensor_args)
+                )
 
                 argv = (ctypes.c_void_p * len(args))()
-                for i, buf in enumerate(arg_buffers):
-                    argv[i] = ctypes.cast(buf, ctypes.c_void_p).value
+                scalar_buffers = []
+                if direct_device_call:
+                    device_index = tensor_args[0].device.index
+                    set_device_ret = self.lib.tilelang_tpu_set_device(
+                        0 if device_index is None else device_index)
+                    if set_device_ret != 0:
+                        return set_device_ret
+                    for i, arg in enumerate(args):
+                        if isinstance(arg, torch.Tensor):
+                            argv[i] = arg.data_ptr()
+                        elif arg is None:
+                            argv[i] = None
+                        else:
+                            buf = scalar_buffer(arg)
+                            scalar_buffers.append(buf)
+                            argv[i] = ctypes.addressof(buf)
+                    return self.lib.tilelang_tpu_run_device(argv)
+
+                arg_buffers = []
+                arg_sizes = []
+                for i, arg in enumerate(args):
+                    if isinstance(arg, torch.Tensor):
+                        tensor = arg.detach().cpu().contiguous()
+                        storage = tensor.untyped_storage()
+                        nbytes = storage.nbytes()
+                        buf = ctypes.create_string_buffer(bytes(storage), nbytes)
+                        arg_buffers.append(buf)
+                        arg_sizes.append(nbytes)
+                        argv[i] = ctypes.addressof(buf)
+                    elif arg is None:
+                        arg_buffers.append(None)
+                        arg_sizes.append(0)
+                        argv[i] = None
+                    else:
+                        buf = scalar_buffer(arg)
+                        scalar_buffers.append(buf)
+                        arg_buffers.append(buf)
+                        arg_sizes.append(ctypes.sizeof(buf))
+                        argv[i] = ctypes.addressof(buf)
 
                 ret = self.lib.tilelang_tpu_run(argv)
                 args_list = list(args)
                 for i in self.result_idx:
+                    if not isinstance(args[i], torch.Tensor):
+                        raise TypeError("TPU output arguments must be tensors")
                     result_tensor = torch.empty(
                         args[i].shape, dtype=args[i].dtype, device="cpu")
                     ctypes.memmove(

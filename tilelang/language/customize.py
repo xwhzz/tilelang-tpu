@@ -511,7 +511,7 @@ def ppl_reduce_sum_safe(inp, out, dim):
     inpptr = inp.access_ptr("rw")
     outptr = out.access_ptr("rw")
     with T.block("reduce_sum"):
-        tmp_shape = [inp.shape[0], 32]  # EU数量为32
+        tmp_shape = [inp.shape[0], 32]
         tmp_buffer_sum = T.alloc_shared(tmp_shape, inp.dtype)
         tmp_ptr = tmp_buffer_sum.access_ptr("rw")
         eu_num = T.int32(32)
@@ -522,13 +522,41 @@ def ppl_reduce_sum_safe(inp, out, dim):
         T.call_extern("handle", "ppl.reduce_sum", inpptr, outptr, tmp_ptr, eu_num, align_w, stride)
 
 
+@T.macro
+def ppl_reduce_sum_safe_4d(inp, out, dim):
+    inpptr = inp.access_ptr("rw")
+    outptr = out.access_ptr("rw")
+    with T.block("reduce_sum"):
+        tmp_shape = [
+            inp.shape[0],
+            inp.shape[1],
+            inp.shape[2],
+            32,
+        ]
+        tmp_buffer_sum = T.alloc_shared(tmp_shape, inp.dtype)
+        tmp_ptr = tmp_buffer_sum.access_ptr("rw")
+        eu_num = T.int32(32)
+        align_w = T.ceildiv(inp.shape[3], eu_num) * eu_num
+        stride = inp.shape[1] * inp.shape[2] * align_w
+        T.call_extern(
+            "handle",
+            "ppl.reduce_sum",
+            inpptr,
+            outptr,
+            tmp_ptr,
+            eu_num,
+            align_w,
+            stride,
+        )
+
+
 def ppl_reduce_sum(inp, out, dim):
-    """Reduce a 2D tile along its second dimension with summation.
+    """Reduce a tile along its last dimension with summation.
 
     Args:
-        inp: Input tile, typically shaped `(M, N)`.
-        out: Output tile, typically shaped `(M, 1)`.
-        dim: Reduction axis. The current TPU path only supports `dim=1`.
+        inp: Input tile, shaped `(M, N)` or `(N, C, H, W)`.
+        out: Output tile with a final dimension of one.
+        dim: Reduction selector. The current TPU API uses `dim=1`.
 
     Returns:
         PrimExpr: Handle to the emitted reduction macro call.
@@ -538,12 +566,14 @@ def ppl_reduce_sum(inp, out, dim):
         `T.ppl_reduce_sum(X_shared, Y_shared, dim=1)`
 
     Notes:
-        This op is intended for 2D tiles and currently only supports
-        reduction along `dim=1`.
-        The usual output shape is `(inp.shape[0], 1)`.
+        Four-dimensional tiles reduce their final `W` dimension while
+        preserving `N`, `C`, and `H`.
     """
     assert dim == 1, "Only dim=1 is supported for reduction"
-    return ppl_reduce_sum_safe(inp, out, dim)
+    if len(inp.shape) == 2:
+        return ppl_reduce_sum_safe(inp, out, dim)
+    assert len(inp.shape) == 4, "Only 2D and 4D tensors are supported"
+    return ppl_reduce_sum_safe_4d(inp, out, dim)
 
 
 @T.macro

@@ -122,6 +122,7 @@ private:
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
   int32_t gemm_idx_ = 0;
+  int for_depth_ = 0;
 
   DictAttrs f_attrs;
 };

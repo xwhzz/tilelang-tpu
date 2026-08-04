@@ -102,7 +102,7 @@ std::string CodeGenTileLangPPL::Finish() {
 
 /* no need to change */
 void CodeGenTileLangPPL::VisitStmt_(const tir::ForNode *op) {
-
+  bool distribute_across_cores = for_depth_ == 0;
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
     stream << "#pragma unroll\n";
@@ -114,10 +114,21 @@ void CodeGenTileLangPPL::VisitStmt_(const tir::ForNode *op) {
   std::string start = PrintExpr(op->min);
   stream << "for (";
   PrintType(op->loop_var.dtype(), stream);
-  stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
-         << "; ++" << vid << ") {\n";
+  stream << ' ' << vid << " = " << start;
+  if (distribute_across_cores) {
+    stream << " + tpu_core_index()";
+  }
+  stream << "; " << vid << " < " << extent << "; ";
+  if (distribute_across_cores) {
+    stream << vid << " += tpu_core_num()";
+  } else {
+    stream << "++" << vid;
+  }
+  stream << ") {\n";
   int for_scope = BeginScope();
+  ++for_depth_;
   PrintStmt(op->body);
+  --for_depth_;
   this->EndScope(for_scope);
   PrintIndent();
   stream << "}\n";
@@ -795,7 +806,7 @@ void CodeGenTileLangPPL::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto handle_elementwise_const = [&, this](std::string op_name) {
     auto dst = var_idmap_[op->args[1].as<CallNode>()->args[1].as<VarNode>()];
     auto src0 = var_idmap_[op->args[2].as<CallNode>()->args[1].as<VarNode>()];
-    float value = Downcast<FloatImm>(op->args[3])->value;
+    std::string value = PrintExpr(op->args[3]);
     auto dtype_ = op->args[1].as<CallNode>()->args[0].as<CallNode>()->dtype;
     std::string dtype;
     std::string scalar_type;
@@ -1829,16 +1840,39 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
   var_idmap_[buffer_var] = vid;
 
   auto buffer_shape = op->extents;
-  if (buffer_shape.size() == 2)
-    buffer_shape.insert(buffer_shape.begin(), make_const(DataType::Int(32), 1));
-  std::string bv_shape = "{ 1, ";
-  std::vector<int> shapes;
-  shapes.push_back(buffer_shape[1].as<IntImmNode>()->value);
-  shapes.push_back(buffer_shape[2].as<IntImmNode>()->value);
-  bv_shape += std::to_string(buffer_shape[1].as<IntImmNode>()->value);
-  bv_shape += ", 1, ";
-  bv_shape += std::to_string(buffer_shape[2].as<IntImmNode>()->value);
+  std::vector<int> physical_shape;
+  if (buffer_shape.size() == 2) {
+    physical_shape = {
+        1,
+        static_cast<int>(buffer_shape[0].as<IntImmNode>()->value),
+        1,
+        static_cast<int>(buffer_shape[1].as<IntImmNode>()->value),
+    };
+  } else if (buffer_shape.size() == 4) {
+    for (const PrimExpr &extent : buffer_shape) {
+      physical_shape.push_back(
+          static_cast<int>(extent.as<IntImmNode>()->value));
+    }
+  } else {
+    LOG(FATAL) << "PPL local buffers must be 2D or 4D, got "
+               << buffer_shape.size() << " dimensions";
+  }
+
+  std::string bv_shape = "{";
+  int element_count = 1;
+  for (size_t i = 0; i < physical_shape.size(); ++i) {
+    if (i != 0) {
+      bv_shape += ", ";
+    }
+    bv_shape += std::to_string(physical_shape[i]);
+    element_count *= physical_shape[i];
+  }
   bv_shape += "}";
+
+  std::vector<int> logical_shape = {
+      physical_shape[0] * physical_shape[1] * physical_shape[2],
+      physical_shape[3],
+  };
   std::string op_dtype;
   int bytes_size = 0;
   if (op->dtype == DataType::Float(16)) {
@@ -1860,25 +1894,22 @@ void CodeGenTileLangPPL::VisitStmt_(const AllocateNode *op) {
     op_dtype = "DT_INT8";
     bytes_size = 1;
   }
-  auto buffer_num = buffer_shape[0].as<IntImmNode>()->value;
-  for (size_t iter{0}; iter < buffer_num; iter++) {
-    this->PrintIndent();
-    int tensor_size = shapes[0] * shapes[1] / lane_num * bytes_size;
-    auto addr =
-        f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)).as<IntImmNode>()->value;
-    buffer_addrs_[buffer_var] = addr;
-    stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape
-           << ", .stride = {0}"
-           << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
-           << ", .align_mode = 1"
-           << ", .size = " << tensor_size
-           << ", .unsigned_flag = 0, .default_stride = false};\n";
-    this->PrintIndent();
-    stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid
-           << ".shape, " << op_dtype << ");\n";
-    this->buffer_shape[vid] = shapes;
-    // store local tensor shape
-  }
+  this->PrintIndent();
+  int tensor_size =
+      ((element_count + lane_num - 1) / lane_num) * bytes_size;
+  auto addr =
+      f_attrs.GetAttr(buffer_var->name_hint, PrimExpr(0)).as<IntImmNode>()->value;
+  buffer_addrs_[buffer_var] = addr;
+  stream << "__ppl_tensor_info " << vid << " = {.shape = " << bv_shape
+         << ", .stride = {0}"
+         << ", .addr = " << addr << ", .dtype = " << op_dtype << ", .mode = 2"
+         << ", .align_mode = 1"
+         << ", .size = " << tensor_size
+         << ", .unsigned_flag = 0, .default_stride = false};\n";
+  this->PrintIndent();
+  stream << "tpu_aligned_stride(&" << vid << ".stride, 0, &" << vid
+         << ".shape, " << op_dtype << ");\n";
+  this->buffer_shape[vid] = logical_shape;
 
   this->PrintStmt(op->body);
 
@@ -2025,7 +2056,7 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   };
 
   // don't use name hint, but can remove later.
-  auto allocate_name = [&, this](const Var &v, int index, int length) {
+  auto allocate_buffer_name = [&, this](const Var &v, int index, int length) {
     auto v_node = v.get();
     std::string vid = "v" + std::to_string(index + 1);
     std::string rid = "v" + std::to_string(index + 1 + length);
@@ -2103,13 +2134,25 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
     return vid;
   };
   int param_len = f->params.size();
+  std::vector<std::string> params_type;
   for (size_t i = 0; i < param_len; ++i) {
     tir::Var v = f->params[i];
-    std::string vid = allocate_name(v, i, param_len);
+    std::string vid = "v" + std::to_string(i + 1);
+    std::ostringstream type_stream;
+    if (buffer_map.count(v)) {
+      vid = allocate_buffer_name(v, i, param_len);
+      type_stream << restrict_keyword_;
+    } else {
+      ICHECK(v.dtype().is_scalar())
+          << "TPU kernel parameters must be buffers or scalar values";
+      PrintType(v.dtype(), type_stream);
+      var_idmap_[v.get()] = vid;
+    }
     params_name.push_back(vid);
+    params_type.push_back(type_stream.str());
     if (i != 0)
       stream << ", ";
-    stream << restrict_keyword_ << ' ' << vid;
+    stream << params_type.back() << ' ' << vid;
   }
   stream << ") {\n";
 
@@ -2126,8 +2169,8 @@ void CodeGenTileLangPPL::AddFunction(const PrimFunc &f) {
   this->stream << "}\n\n";
 
   this->stream << "typedef struct {\n";
-  for (auto &name : params_name) {
-    this->stream << "  " << restrict_keyword_ << " " << name << ";\n";
+  for (size_t i = 0; i < params_name.size(); ++i) {
+    this->stream << "  " << params_type[i] << " " << params_name[i] << ";\n";
   }
   std::string api_name = "tpu_kernel_api_main_inner_args_t";
   this->stream << "} " << api_name << ";\n";

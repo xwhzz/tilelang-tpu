@@ -2,28 +2,55 @@
 #include "host_test_utils.h"
 #include "kernel.h"
 #include <cstdlib>
-#include <cstring>
-#include <string>
-#include <vector>
-#include <chrono>
-#include <iostream>
+#include <mutex>
 
 tpuRtStream_t stream;
 tpuRtKernelModule_t tpu_module;
 
-static bool g_tpu_initialized = false;
+static bool g_runtime_initialized = false;
+static bool g_context_initialized = false;
+static int g_device_id = -1;
+static std::mutex g_init_mutex;
 
-int init(){{
+extern "C" int tilelang_tpu_set_device(int device_id) {{
+  std::lock_guard<std::mutex> lock(g_init_mutex);
+  if (g_context_initialized && device_id != g_device_id) {{
+    return -3;
+  }}
+  g_device_id = device_id;
+  return 0;
+}}
+
+extern "C" int tilelang_tpu_synchronize() {{
+  if (!g_context_initialized) {{
+    return 0;
+  }}
+  return tpuRtStreamSynchronize(stream);
+}}
+
+int init() {{
+  std::lock_guard<std::mutex> lock(g_init_mutex);
+  if (g_context_initialized) {{
+    return 0;
+  }}
+
   tpuRtStatus_t ret;
-  if (!g_tpu_initialized) {{
+  if (!g_runtime_initialized) {{
     ret = tpuRtInit();
     if (ret != tpuRtSuccess) {{
       return -1;
     }}
-    tpuRtSetDevice(0); // Set TPU ID
-    g_tpu_initialized = true;
+    g_runtime_initialized = true;
   }}
-  tpuRtStreamCreate(&stream);
+  if (g_device_id < 0) {{
+    const char *device_env = getenv("TPU_DEVICE_ID");
+    g_device_id = device_env ? std::atoi(device_env) : 0;
+  }}
+  tpuRtSetDevice(g_device_id);
+  ret = tpuRtStreamCreate(&stream);
+  if (ret != tpuRtSuccess) {{
+    return -1;
+  }}
   auto kernel_dir = getenv("PPL_KERNEL_PATH");
   if (!kernel_dir) {{
     tpuRtStreamDestroy(stream);
@@ -35,98 +62,60 @@ int init(){{
     tpuRtStreamDestroy(stream);
     return -2;
   }}
+  g_context_initialized = true;
   return 0;
 }}
 
-void post(){{
+void post() {{
+  std::lock_guard<std::mutex> lock(g_init_mutex);
+  if (!g_context_initialized) {{
+    return;
+  }}
   tpuRtKernelUnloadModule(tpu_module, stream);
   tpuRtStreamDestroy(stream);
+  tpu_module = nullptr;
+  stream = nullptr;
+  g_context_initialized = false;
+}}
+
+__attribute__((destructor)) static void tilelang_tpu_shutdown() {{
+  post();
+}}
+
+extern "C" int tilelang_tpu_run_device(void** args) {{
+{device_arg_declarations}
+
+  int res = init();
+  if (res != 0) {{
+    return res;
+  }}
+
+{device_kernel_call}
+  return rst;
 }}
 
 extern "C" int tilelang_tpu_run(void** args) {{
 {arg_declarations}
 
   int res = init();
-  if(res != 0){{
+  if (res != 0) {{
     return res;
   }}
 
-  // 设备指针声明
 {device_declarations}
 
-  // 分配设备内存
 {malloc_statements}
 
-  // 拷贝数据到设备
 {memcpy_s2d_statements}
-
-  // 调用内核函数
-
-  auto start = std::chrono::high_resolution_clock::now();  // 开始计时
 
 {kernel_call}
 
-  auto end = std::chrono::high_resolution_clock::now();    // 结束计时
-
-  if (rst) {{
-    printf("kernel_launch failed\n");
-    return 1;
-  }}
-  printf("kernel_launch success\n");
-
-  // 计算执行时间
-  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-  double elapsed_time_ms = duration.count() / 1000.0;
-  double elapsed_time_us = duration.count();
-
-  printf("Single kernel execution time: %.3f ms (%.0f us)\n", elapsed_time_ms, elapsed_time_us);
-
-  // 性能测试
-  const int warmup_runs = 5;
-  const int measure_runs = 10;
-
-  printf("\n=== Performance Benchmark (after %d warmup runs) ===\n", warmup_runs);
-
-  // 预热运行
-  for (int i = 0; i < warmup_runs; i++) {{
-    {pure_kernel_call}
-  }}
-
-  printf("Runs: %d\n", measure_runs);
-
-  // 测量运行
-  double total_time_us = 0.0;
-  double min_time_us = std::numeric_limits<double>::max();
-  double max_time_us = 0.0;
-
-  for (int i = 0; i < measure_runs; i++) {{
-    auto run_start = std::chrono::high_resolution_clock::now();
-    {pure_kernel_call}
-    auto run_end = std::chrono::high_resolution_clock::now();
-    
-    auto run_duration = std::chrono::duration_cast<std::chrono::microseconds>(run_end - run_start);
-    double run_time_us = run_duration.count();
-    
-    total_time_us += run_time_us;
-    min_time_us = std::min(min_time_us, run_time_us);
-    max_time_us = std::max(max_time_us, run_time_us);
-  }}
-
-  double avg_time_us = total_time_us / measure_runs;
-  double avg_time_ms = avg_time_us / 1000.0;
-
-
-  printf("Average execution time: %.3f ms (%.0f us)\n", avg_time_ms, avg_time_us);
-  printf("Minimum execution time: %.3f ms (%.0f us)\n", min_time_us / 1000.0, min_time_us);
-  printf("Maximum execution time: %.3f ms (%.0f us)\n", max_time_us / 1000.0, max_time_us);
-  
-  // 拷贝输出数据回主机
+  if (rst == 0) {{
 {memcpy_d2s_statements}
-  tpuRtStreamSynchronize(stream);
+    tpuRtStreamSynchronize(stream);
+  }}
 
-  // 释放设备内存
 {free_statements}
-
   post();
-  return 0;
+  return rst;
 }}
