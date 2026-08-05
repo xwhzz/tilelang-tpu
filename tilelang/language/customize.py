@@ -338,6 +338,25 @@ def ppl_gather(output, param, index, param_h):
     paramptr = param.access_ptr("r")
     indexptr = index.access_ptr("r")
     return T.call_extern("handle", "ppl.gather", outptr, paramptr, indexptr, param_h)
+
+
+def ppl_gather_block(output, param, index, param_h, gather_h, gather_w):
+    outptr = output.access_ptr("w")
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    return T.call_extern(
+        "handle", "ppl.gather_block", outptr, paramptr, indexptr,
+        param_h, gather_h, gather_w,
+    )
+
+
+def ppl_scatter(output, param, index, param_h):
+    outptr = output.access_ptr("w")
+    paramptr = param.access_ptr("r")
+    indexptr = index.access_ptr("r")
+    return T.call_extern(
+        "handle", "ppl.scatter", outptr, paramptr, indexptr, param_h,
+    )
     
 def ppl_topk(dst_data, dst_idx, src, K, descended, length):
     dst_data_ptr = dst_data.access_ptr("w")

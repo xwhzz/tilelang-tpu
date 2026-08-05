@@ -77,6 +77,8 @@ from .customize import (
     ppl_rope_add,  # noqa: F401
     ppl_sigmoid,  # noqa: F401
     ppl_gather,  # noqa: F401
+    ppl_gather_block,  # noqa: F401
+    ppl_scatter,  # noqa: F401
     ppl_topk,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
