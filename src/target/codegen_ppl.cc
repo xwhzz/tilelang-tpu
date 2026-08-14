@@ -82,14 +82,16 @@ void CodeGenTileLangPPL::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {}
 
 std::string CodeGenTileLangPPL::Finish() {
   decl_stream << "#include \"ppl_helper.h\"\n";
-  decl_stream << "static data_type_t __ppl_get_dtype(int type) {\n"
+  decl_stream << "#ifndef TILELANG_PPL_HELPER_HAS_GET_DTYPE\n"
+              << "static data_type_t __ppl_get_dtype(int type) {\n"
               << "  data_type_t __dtype[] = {DT_FP32,    DT_FP32,    DT_FP16,  "
                  "DT_BFP16,\n"
               << "    DT_FP8E5M2, DT_FP8E4M3, DT_FP20,  DT_TF32,\n"
               << "    DT_INT32,   DT_UINT32,  DT_INT16, DT_UINT16,\n"
               << "    DT_INT8,    DT_UINT8,   DT_INT4,  DT_UINT4};\n"
               << "  return __dtype[type];\n"
-              << "}\n\n";
+              << "}\n"
+              << "#endif\n\n";
   decl_stream << "typedef struct {\n"
               << "    dim4 shape;\n"
               << "    dim4 stride;\n"
