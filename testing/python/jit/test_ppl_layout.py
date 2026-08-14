@@ -32,10 +32,37 @@ def test_resolve_ppl_17_layout(tmp_path):
 
     assert layout.release == "1.7"
     assert layout.arch == arch
+    assert layout.max_core_num == 8
     assert layout.compile_definitions == ("__tpub_7_1__", "__sg2260__")
     assert layout.firmware_archive == (
         tmp_path / f"deps/chip/{arch}/lib/libfirmware_core.a"
     )
+
+
+def test_resolve_sg2260e_core_count(tmp_path):
+    arch = "tpub_7_1_e"
+    (tmp_path / "deps/chip").mkdir(parents=True)
+    (tmp_path / "deps/chip/chip_map.json").write_text(
+        json.dumps({"sg2260e": arch}), encoding="utf-8"
+    )
+    for directory in (
+        f"deps/chip/{arch}/TPU1686/kernel/include",
+        f"deps/chip/{arch}/lib",
+        "deps/common/dev/kernel",
+        "deps/common/dev/utils/include",
+        "deps/common/host/include",
+        "deps/runtime/tpuv7-runtime/include",
+        "deps/runtime/tpuv7-runtime/lib",
+    ):
+        (tmp_path / directory).mkdir(parents=True)
+    _touch(tmp_path / "deps/common/dev/utils/src/ppl_helper.c")
+    _touch(tmp_path / f"deps/chip/{arch}/lib/libtpuv7_emulator.so")
+
+    layout = resolve_ppl_layout(str(tmp_path), "sg2260e")
+
+    assert layout.arch == arch
+    assert layout.max_core_num == 4
+    assert layout.compile_definitions == ("__tpub_7_1_e__", "__sg2260e__")
 
 
 def test_resolve_legacy_layout(tmp_path):
@@ -57,4 +84,5 @@ def test_resolve_legacy_layout(tmp_path):
 
     assert layout.release == "legacy"
     assert layout.arch == "bm1690"
+    assert layout.max_core_num == 8
     assert layout.compile_definitions == ("__bm1690__",)

@@ -13,6 +13,7 @@ import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
 from tilelang.jit.adapter.utils import get_tpu_template_dir
 from tilelang.jit.adapter.ppl_layout import PPLLayout, resolve_ppl_layout
+from tilelang.engine.tpu_config import TPUCompileConfig, resolve_tpu_compile_config
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,13 @@ class LibraryGenerator(object):
     lib_code: Optional[str] = None
     mode: Literal["pcie", "cmodel"] = "pcie"
 
-    def __init__(self, target: Target, mode: Literal["pcie", "cmodel"] = "pcie"):
+    def __init__(self,
+                 target: Target,
+                 mode: Optional[Literal["pcie", "cmodel"]] = None,
+                 tpu_config: Optional[TPUCompileConfig] = None):
         self.target = target
-        self.mode = mode
+        self.tpu_config = tpu_config or resolve_tpu_compile_config(mode=mode)
+        self.mode = self.tpu_config.runtime_mode
 
     def update_lib_code(self, lib_code: str):
         self.lib_code = lib_code
@@ -94,15 +99,19 @@ class LibraryGenerator(object):
             PPL_TOP = os.environ.get("PPL_PROJECT_ROOT", None)
             if not PPL_TOP:
                 raise EnvironmentError("PPL_PROJECT_ROOT environment variable is not set.")
-            CHIP = "bm1690"
-            ppl_layout = resolve_ppl_layout(PPL_TOP, CHIP)
+            ppl_layout = resolve_ppl_layout(PPL_TOP, self.tpu_config.chip)
 
-            if mode=="pcie":
+            if self.tpu_config.device_mode == "rv":
+                raise NotImplementedError(
+                    "RV target configuration reached LibraryGenerator, but RV "
+                    "lowering/codegen is not implemented yet")
+
+            if self.mode=="pcie":
                 self.tpu_compile_pcie(timeout=timeout, layout=ppl_layout)
-            elif mode=="cmodel":
+            elif self.mode=="cmodel":
                 self.tpu_compile_cmodel(timeout=timeout, layout=ppl_layout)
             else:
-                raise ValueError(f"Unsupported compile mode: {mode}")
+                raise ValueError(f"Unsupported compile mode: {self.mode}")
             self.srcpath = src.name
             self.libpath = f"{get_tpu_template_dir()}/main.so"
             return
@@ -239,6 +248,11 @@ class LibraryGenerator(object):
         libkernel = os.path.join(src_dir, "libkernel.so")
         main_so = os.path.join(src_dir, "main.so")
         rpath = f"{layout.runtime_lib}:{layout.backend_lib}"
+
+        # TPUv7 defaults to eight emulator cores. SG2260E exposes four, and
+        # launching the extra scalar-emulator workers makes them address
+        # non-existent cores before the first kernel can complete.
+        os.environ["TPU_RT_CORE_NUM"] = str(layout.max_core_num)
 
         logger.info("Compiling TPU cmodel kernel for %s (%s layout)", layout.arch, layout.release)
         self._prepare_cmodel_kernel_source(kernel_c)

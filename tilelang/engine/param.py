@@ -3,11 +3,14 @@
 """The profiler and convert to torch utils"""
 
 from dataclasses import dataclass
-from typing import List, Union, Optional
+from typing import List, Union, Optional, TYPE_CHECKING
 import torch
 from tilelang import tvm as tvm
 from tvm.tir import Buffer, IntImm, Var
 from tilelang.utils.tensor import map_torch_type
+
+if TYPE_CHECKING:
+    from tilelang.engine.tpu_config import TPUCompileConfig
 
 
 @dataclass
@@ -107,3 +110,4 @@ class CompiledArtifact:
     kernel_source: str  # Raw source code of the generated kernel
     rt_mod: Optional[
         tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized
+    tpu_config: Optional["TPUCompileConfig"] = None

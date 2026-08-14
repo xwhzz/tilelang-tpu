@@ -13,6 +13,7 @@ class PPLLayout:
     release: str
     logical_chip: str
     arch: str
+    max_core_num: int
     compile_definitions: Tuple[str, ...]
     kernel_include: Path
     kernel_common_include: Path
@@ -41,6 +42,11 @@ class PPLLayout:
 _PPL_17_CHIP_DEFINITIONS = {
     "tpub_7_1": ("__tpub_7_1__", "__sg2260__"),
     "tpub_7_1_e": ("__tpub_7_1_e__", "__sg2260e__"),
+}
+
+_PPL_17_MAX_CORE_NUM = {
+    "tpub_7_1": 8,
+    "tpub_7_1_e": 4,
 }
 
 
@@ -79,6 +85,7 @@ def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout
                 release="1.7",
                 logical_chip=logical_chip,
                 arch=arch,
+                max_core_num=_PPL_17_MAX_CORE_NUM.get(arch, 1),
                 compile_definitions=definitions,
                 kernel_include=chip_root / "TPU1686/kernel/include",
                 kernel_common_include=common_root / "dev/kernel",
@@ -101,6 +108,7 @@ def resolve_ppl_layout(ppl_root: str, logical_chip: str = "bm1690") -> PPLLayout
             release="legacy",
             logical_chip=logical_chip,
             arch=logical_chip,
+            max_core_num=8 if logical_chip == "bm1690" else 1,
             compile_definitions=(f"__{logical_chip}__",),
             kernel_include=chip_root / "TPU1686/kernel/include",
             kernel_common_include=root / "runtime/kernel",

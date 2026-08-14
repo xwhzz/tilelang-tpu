@@ -68,6 +68,9 @@ class KernelCache:
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
+        chip: str = "bm1690",
+        device_mode: Literal["atomic", "rv"] = "atomic",
+        runtime_mode: Literal["pcie", "cmodel"] = "pcie",
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -93,6 +96,9 @@ class KernelCache:
             "target": str(target),
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
+            "chip": chip,
+            "device_mode": device_mode,
+            "runtime_mode": runtime_mode,
         }
         key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
         return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
@@ -107,7 +113,10 @@ class KernelCache:
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        mode: Literal["pcie", "cmodel"] = "pcie",
+        chip: str = "bm1690",
+        device_mode: Literal["atomic", "rv"] = "atomic",
+        runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
+        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -131,6 +140,9 @@ class KernelCache:
                 target_host=target_host,
                 verbose=verbose,
                 pass_configs=pass_configs,
+                chip=chip,
+                device_mode=device_mode,
+                runtime_mode=runtime_mode,
                 mode=mode,
             )
 
@@ -163,6 +175,9 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            chip=chip,
+            device_mode=device_mode,
+            runtime_mode=runtime_mode,
             mode=mode
         )
         # if execution_backend == "dlpack":
