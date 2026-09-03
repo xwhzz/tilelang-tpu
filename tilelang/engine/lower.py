@@ -12,6 +12,7 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.engine.param import KernelParam, CompiledArtifact
+from tilelang.engine.tpu_config import resolve_tpu_compile_config
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
     LowerAndLegalize,
@@ -199,6 +200,9 @@ def lower(
     runtime_only=False,
     enable_host_codegen=False,
     enable_device_compile=False,
+    chip: str = "bm1690",
+    device_mode: str = "atomic",
+    runtime_mode: str = "pcie",
 ) -> CompiledArtifact:
     '''
         enable_host_codegen: whether to enable host codegen, default is False, as we have our
@@ -207,6 +211,8 @@ def lower(
         own device codegen implementation in jit.
     '''
 
+    tpu_config = resolve_tpu_compile_config(
+        chip=chip, device_mode=device_mode, runtime_mode=runtime_mode)
     mod = func_or_mod
     if isinstance(func_or_mod, tir.PrimFunc):
         func = func_or_mod
@@ -247,4 +253,5 @@ def lower(
     #     return CompiledArtifact(
     #         host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod)
+    return CompiledArtifact(
+        host_mod, device_mod, params, codegen_mod, tpu_config=tpu_config)

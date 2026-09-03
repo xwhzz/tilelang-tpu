@@ -16,6 +16,7 @@ from tilelang.jit.adapter import (
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.engine.param import KernelParam, CompiledArtifact
+from tilelang.engine.tpu_config import resolve_tpu_compile_config
 
 
 class JITKernel(object):
@@ -46,7 +47,10 @@ class JITKernel(object):
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
         from_database: bool = False,
-        mode: Literal["pcie", "cmodel"] = "pcie",
+        chip: str = "bm1690",
+        device_mode: Literal["atomic", "rv"] = "atomic",
+        runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
+        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -81,7 +85,14 @@ class JITKernel(object):
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs
-        self.mode = mode
+        self.tpu_config = resolve_tpu_compile_config(
+            chip=chip,
+            device_mode=device_mode,
+            runtime_mode=runtime_mode,
+            mode=mode,
+        )
+        # Compatibility for callers that still inspect the old attribute.
+        self.mode = self.tpu_config.runtime_mode
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
@@ -97,11 +108,6 @@ class JITKernel(object):
             "ctypes",
             "cython",
         ], f"Invalid execution backend. {execution_backend}"
-
-        assert mode in [
-            "pcie",
-            "cmodel",
-        ], f"Invalid execution mode. {mode}"
 
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -132,7 +138,10 @@ class JITKernel(object):
         out_idx: Union[List[int], int],
         execution_backend: Literal["dlpack", "ctypes", "cython"],
         pass_configs: Optional[Dict[str, Any]] = None,
-        mode: Literal["pcie", "cmodel"] = "pcie",
+        chip: str = "bm1690",
+        device_mode: Literal["atomic", "rv"] = "atomic",
+        runtime_mode: Optional[Literal["pcie", "cmodel"]] = None,
+        mode: Optional[Literal["pcie", "cmodel"]] = None,
     ):
         """
         Alternative constructor to create a TorchFunction directly from a database.
@@ -145,6 +154,9 @@ class JITKernel(object):
             target_host=target_host,
             pass_configs=pass_configs,
             from_database=True,
+            chip=chip,
+            device_mode=device_mode,
+            runtime_mode=runtime_mode,
             mode=mode,
         )
 
@@ -199,8 +211,6 @@ class JITKernel(object):
         execution_backend = self.execution_backend
         pass_configs = self.pass_configs
 
-        mode = self.mode
-
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
@@ -210,7 +220,10 @@ class JITKernel(object):
                 target=target,
                 target_host=target_host,
                 enable_host_codegen=enable_host_codegen,
-                enable_device_compile=enable_device_compile)
+                enable_device_compile=enable_device_compile,
+                chip=self.tpu_config.chip,
+                device_mode=self.tpu_config.device_mode,
+                runtime_mode=self.tpu_config.runtime_mode)
 
         self.artifact = artifact
 
@@ -245,7 +258,7 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
-                mode=mode,
+                tpu_config=self.tpu_config,
             )
         else:
             # Handle invalid backend.

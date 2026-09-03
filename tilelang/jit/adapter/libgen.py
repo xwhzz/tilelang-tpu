@@ -12,6 +12,8 @@ import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
 from tilelang.jit.adapter.utils import get_tpu_template_dir
+from tilelang.jit.adapter.ppl_layout import PPLLayout, resolve_ppl_layout
+from tilelang.engine.tpu_config import TPUCompileConfig, resolve_tpu_compile_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +24,13 @@ class LibraryGenerator(object):
     lib_code: Optional[str] = None
     mode: Literal["pcie", "cmodel"] = "pcie"
 
-    def __init__(self, target: Target, mode: Literal["pcie", "cmodel"] = "pcie"):
+    def __init__(self,
+                 target: Target,
+                 mode: Optional[Literal["pcie", "cmodel"]] = None,
+                 tpu_config: Optional[TPUCompileConfig] = None):
         self.target = target
-        self.mode = mode
+        self.tpu_config = tpu_config or resolve_tpu_compile_config(mode=mode)
+        self.mode = self.tpu_config.runtime_mode
 
     def update_lib_code(self, lib_code: str):
         self.lib_code = lib_code
@@ -93,14 +99,19 @@ class LibraryGenerator(object):
             PPL_TOP = os.environ.get("PPL_PROJECT_ROOT", None)
             if not PPL_TOP:
                 raise EnvironmentError("PPL_PROJECT_ROOT environment variable is not set.")
-            CHIP = "bm1690"
+            ppl_layout = resolve_ppl_layout(PPL_TOP, self.tpu_config.chip)
 
-            if mode=="pcie":
-                self.tpu_compile_pcie(timeout=timeout, PPL_TOP=PPL_TOP, CHIP=CHIP)
-            elif mode=="cmodel":
-                self.tpu_compile_cmodel(timeout=timeout, PPL_TOP=PPL_TOP, CHIP=CHIP)
+            if self.tpu_config.device_mode == "rv":
+                raise NotImplementedError(
+                    "RV target configuration reached LibraryGenerator, but RV "
+                    "lowering/codegen is not implemented yet")
+
+            if self.mode=="pcie":
+                self.tpu_compile_pcie(timeout=timeout, layout=ppl_layout)
+            elif self.mode=="cmodel":
+                self.tpu_compile_cmodel(timeout=timeout, layout=ppl_layout)
             else:
-                raise ValueError(f"Unsupported compile mode: {mode}")
+                raise ValueError(f"Unsupported compile mode: {self.mode}")
             self.srcpath = src.name
             self.libpath = f"{get_tpu_template_dir()}/main.so"
             return
@@ -161,255 +172,114 @@ class LibraryGenerator(object):
             with open(kernel_path, "w") as f:
                 f.write(sanitized)
 
-    def tpu_compile_pcie(self, timeout, PPL_TOP, CHIP):
-        TOOLCHAIN_DIR = f"{PPL_TOP}/third_party/toolchains_dir/Xuantie-900-gcc-linux-5.10.4-glibc-x86_64-V2.6.1"
-        CROSS_COMPILE = f"{TOOLCHAIN_DIR}/bin/riscv64-unknown-linux-gnu-"
-
-        # 构建包含路径
-        includes = [
-            "-I/lib/x86_64-linux-gnu/",
-            "-I./build/include",
-            f"-I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include",
-            f"-I{PPL_TOP}/runtime/kernel",
-            f"-I{PPL_TOP}/runtime/customize/include",
-            f"-I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include"
-        ]
-
-        # 构建库路径
-        lib_paths = [
-            "-L/lib/x86_64-linux-gnu/",
-            f"-L{PPL_TOP}/runtime/{CHIP}/lib",
-            "-L/opt/tpuv7/tpuv7-current/lib/",
-            f"-L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib"
-        ]
-        src_dir = get_tpu_template_dir()
-
-        # 编译kernel.c
-        cmd1 = [
-            f"{CROSS_COMPILE}gcc",
-            "-D__bm1690__",
-            "-Dlibkernel_EXPORTS",
-            *includes,
-            "-Wl,--no-undefined",
-            "-fPIC",
-            "-c",
-            f"{src_dir}/kernel.c",
-            "-o",
-            f"{src_dir}/kernel.o"
-        ]
-
-        # 编译ppl_helper.c
-        cmd2 = [
-            f"{CROSS_COMPILE}gcc", 
-            "-D__bm1690__",
-            "-Dlibkernel_EXPORTS",
-            *includes,
-            "-Wl,--no-undefined",
-            "-fPIC",
-            "-c",
-            f"{PPL_TOP}/runtime/customize/src/ppl_helper.c",
-            "-o",
-            f"{src_dir}/ppl_helper.o"
-        ]
-
-        # 链接命令 - 创建共享库
-        link_cmd = [
-            f"{CROSS_COMPILE}gcc",
-            "-fPIC",
-            "-Wl,--no-undefined", 
-            "-shared",
-            "-Wl,-soname,libkernel.so",
-            "-o", f"{src_dir}/libkernel.so",
-            f"{src_dir}/kernel.o",
-            f"{src_dir}/ppl_helper.o",
-            *lib_paths,
-            "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
-            "-Wl,--whole-archive",
-            "-Wl,-Bstatic",
-            f"-l{CHIP}",
-            "-Wl,-Bdynamic", 
-            "-Wl,--no-whole-archive",
-            "-lm"
-        ]
-
+    @staticmethod
+    def _run_tpu_command(command, task_name, timeout):
         try:
-            ret1 = subprocess.run(cmd1, timeout=timeout)
-            ret2 = subprocess.run(cmd2, timeout=timeout)
-            ret3 = subprocess.run(link_cmd, timeout=timeout)
-        except Exception as e:
-            raise RuntimeError(f"Compile kernel failed because of {e}") from e
+            subprocess.run(command, timeout=timeout, check=True)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise RuntimeError(f"{task_name} failed: {e}") from e
 
-        if ret1.returncode != 0 or ret2.returncode != 0 or ret3.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {link_cmd}")
+    @staticmethod
+    def _ppl_compile_flags(layout: PPLLayout, src_dir: str):
+        definitions = [f"-D{definition}" for definition in layout.compile_definitions]
+        if layout.release == "1.7":
+            definitions.append("-DTILELANG_PPL_HELPER_HAS_GET_DTYPE")
+        includes = [f"-I{path}" for path in layout.include_dirs]
+        include_dir = os.path.join(src_dir, "include")
+        if os.path.isdir(include_dir):
+            includes.append(f"-I{include_dir}")
+        return definitions, includes
 
+    def tpu_compile_pcie(self, timeout, layout: PPLLayout):
+        cross_compile = str(layout.toolchain_dir / "bin/riscv64-unknown-linux-gnu-")
+        cross_gcc = cross_compile + "gcc"
+        if not os.path.isfile(cross_gcc):
+            raise FileNotFoundError(f"PPL PCIe cross compiler is missing: {cross_gcc}")
 
-
-        
-        # 1. 编译main.cpp
-        cmd4 = [
-            "g++",
-            f"-D__{CHIP}__",
-            *includes,
-            "-Wl,--no-undefined",
-            "-std=c++11",
-            "-fPIC",
-            "-c",
-            f"{src_dir}/kernel.cpp",
-            "-o",
-            f"{src_dir}/kernel_host.o"
-        ]
-        
-        # 2. 编译main.cpp
-        cmd5 = [
-            "g++",
-            f"-D__{CHIP}__", 
-            *includes,
-            "-Wl,--no-undefined",
-            "-std=c++11",
-            "-fPIC", 
-            "-c",
-            f"{src_dir}/main.cpp",
-            "-o",
-            f"{src_dir}/main.o"
-        ]
-        
-        # 3. 生成动态库
-        cmd_shared = [
-            "g++",
-            "-shared",
-            "-fPIC",
-            "-Wl,--no-undefined",
-            "-o",
-            f"{src_dir}/main.so",
-            f"{src_dir}/kernel_host.o",
-            f"{src_dir}/main.o",
-            *lib_paths,
-            "-Wl,-rpath," + f"{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib",
-            "-ltpuv7_rt",
-            "-lcdm_daemon_emulator", 
-            "-lpthread"
-        ]
-
-        try:
-            ret1 = subprocess.run(cmd4, timeout=timeout)
-            ret2 = subprocess.run(cmd5, timeout=timeout)
-            ret3 = subprocess.run(cmd_shared, timeout=timeout)
-        except Exception as e:
-            raise RuntimeError(f"Compile kernel failed because of {e}") from e
-
-        if ret1.returncode != 0 or ret2.returncode != 0 or ret3.returncode != 0:
-            raise RuntimeError(f"Host Compilation Failed! {cmd_shared}")
-
-
-    def tpu_compile_cmodel(self, PPL_TOP, CHIP, timeout):
         src_dir = get_tpu_template_dir()
-        KERNEL_C = f"{src_dir}/kernel.c"
-        KERNEL_CPP = f"{src_dir}/kernel.cpp"
-        MAIN_CPP = f"{src_dir}/main.cpp"
-        CHIP = "bm1690"
-        OUTPUT_PATH = f"{src_dir}"
+        definitions, includes = self._ppl_compile_flags(layout, src_dir)
+        common = definitions + ["-Dlibkernel_EXPORTS"] + includes + ["-O3", "-DNDEBUG", "-fPIC"]
+        kernel_o = os.path.join(src_dir, "kernel.o")
+        helper_o = os.path.join(src_dir, "ppl_helper.o")
+        libkernel = os.path.join(src_dir, "libkernel.so")
+        rpath = f"{layout.backend_lib}:{layout.runtime_lib}"
 
-        def execute_command(cmd, task_name, timeout):
-            """Execute a shell command and handle errors"""
-            # for debug
-            # print(f"\n[{task_name}]")
-            # print(f"Command: {cmd}")
-            
-            try:
-                _ = subprocess.run(cmd, timeout= timeout, shell=True, check=True, text=True)
-                print(f"{task_name} completed")
-                return True
-            except subprocess.CalledProcessError as e:
-                raise RuntimeError(f"Compile kernel failed because of {e}") from e
+        self._run_tpu_command(
+            [cross_gcc, *common, "-c", os.path.join(src_dir, "kernel.c"), "-o", kernel_o],
+            "Compile TPU kernel", timeout)
+        self._run_tpu_command(
+            [cross_gcc, *common, "-c", str(layout.ppl_helper_source), "-o", helper_o],
+            "Compile PPL helper", timeout)
+        self._run_tpu_command(
+            [cross_gcc, "-shared", "-fPIC", "-Wl,--no-undefined",
+             "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_o, helper_o,
+             f"-Wl,-rpath,{rpath}", "-Wl,--whole-archive", str(layout.firmware_archive),
+             "-Wl,--no-whole-archive", "-lm"],
+            "Link PCIe libkernel.so", timeout)
 
-        print("=" * 60)
-        print("PPL COMPILATION STARTING")
-        print(f"Chip: {CHIP}")
-        print(f"Output: {OUTPUT_PATH}")
-        print("Mode: cmodel")
-        print("=" * 60)
+        host_common = definitions + includes + ["-O3", "-DNDEBUG", "-std=c++17", "-fPIC"]
+        kernel_host_o = os.path.join(src_dir, "kernel_host.o")
+        main_o = os.path.join(src_dir, "main.o")
+        self._run_tpu_command(
+            ["g++", *host_common, "-c", os.path.join(src_dir, "kernel.cpp"), "-o", kernel_host_o],
+            "Compile TPU host wrapper", timeout)
+        self._run_tpu_command(
+            ["g++", *host_common, "-c", os.path.join(src_dir, "main.cpp"), "-o", main_o],
+            "Compile TPU host entry", timeout)
+        self._run_tpu_command(
+            ["g++", "-shared", "-fPIC", "-Wl,--no-undefined", "-o",
+             os.path.join(src_dir, "main.so"), kernel_host_o, main_o,
+             f"-L{layout.runtime_lib}", "-L/opt/tpuv7/tpuv7-current/lib",
+             f"-Wl,-rpath,{layout.runtime_lib}", "-ltpuv7_rt", "-lpthread"],
+            "Link PCIe main.so", timeout)
+        os.environ["PPL_KERNEL_PATH"] = libkernel
 
-        self._prepare_cmodel_kernel_source(KERNEL_C)
-        
-        # 1. Compile kernel-cpp (kernel_cpp)
-        cmd1 = f"""/usr/bin/c++ -D__{CHIP}__ \
-        -I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include \
-        -I{PPL_TOP}/runtime/customize/include \
-        -I{PPL_TOP}/runtime/kernel \
-        -I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include \
-        -I{OUTPUT_PATH}/include \
-        -Wl,--no-undefined -O3 -DNDEBUG -O3 -fPIC -std=c++11 \
-        -c {KERNEL_CPP} \
-        -o {OUTPUT_PATH}/kernel_cpp.o"""
-        
-        execute_command(cmd1, "Compile kernel cpp", timeout)
-        
-        # 2. Compile main-cpp (main_cpp)
-        cmd2 = f"""/usr/bin/c++ -D__{CHIP}__ \
-        -I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include \
-        -I{PPL_TOP}/runtime/customize/include \
-        -I{PPL_TOP}/runtime/kernel \
-        -I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include \
-        -I{OUTPUT_PATH}/include \
-        -Wl,--no-undefined -O3 -DNDEBUG -O3 -fPIC -std=c++11 \
-        -c {MAIN_CPP} \
-        -o {OUTPUT_PATH}/main_cpp.o"""
-        
-        execute_command(cmd2, "Compile main cpp", timeout)
-        
-        # 3. Compile kernel-c (kernel_c)
-        cmd3 = f"""/usr/bin/cc -D__{CHIP}__ -Dkernel_EXPORTS \
-        -I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include \
-        -I{PPL_TOP}/runtime/customize/include \
-        -I{PPL_TOP}/runtime/kernel \
-        -I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include \
-        -I{OUTPUT_PATH}/include \
-        -I{OUTPUT_PATH}/include \
-        -I{PPL_TOP}/include \
-        -I{PPL_TOP}/runtime/{CHIP}/TPU1686/common/include \
-        -Wl,--no-undefined -O3 -DNDEBUG -fPIC -O3 \
-        -c {KERNEL_C} \
-        -o {OUTPUT_PATH}/kernel_c.o"""
-        
-        execute_command(cmd3, "Compile C kernel", timeout)
-        
-        # 4. Compile ppl_helper.c
-        PPL_HELPER = f"{PPL_TOP}/runtime/customize/src/ppl_helper.c"
-        cmd4 = f"""/usr/bin/cc -D__{CHIP}__ -Dkernel_EXPORTS \
-        -I{PPL_TOP}/runtime/{CHIP}/TPU1686/kernel/include \
-        -I{PPL_TOP}/runtime/customize/include \
-        -I{PPL_TOP}/runtime/kernel \
-        -I{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/include \
-        -I{OUTPUT_PATH}/include \
-        -I{OUTPUT_PATH}/include \
-        -I{PPL_TOP}/include \
-        -I{PPL_TOP}/runtime/{CHIP}/TPU1686/common/include \
-        -Wl,--no-undefined -O3 -DNDEBUG -fPIC -O3 \
-        -c {PPL_HELPER} \
-        -o {OUTPUT_PATH}/ppl_helper_c.o"""
-        
-        execute_command(cmd4, "Compile PPL helper", timeout)
-        
-        # 5. Link libkernel.so
-        cmd5 = f"""/usr/bin/cc -fPIC -Wl,--no-undefined -O3 -DNDEBUG -shared -Wl,-soname,libkernel.so \
-        -o {OUTPUT_PATH}/libkernel.so \
-        {OUTPUT_PATH}/kernel_c.o \
-        {OUTPUT_PATH}/ppl_helper_c.o \
-        -L{PPL_TOP}/runtime/{CHIP}/lib \
-        -L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
-        -Wl,-rpath,{PPL_TOP}/runtime/{CHIP}/lib:{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
-        {PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib/libtpuv7_emulator.so -lm"""
-        
-        execute_command(cmd5, "Link libkernel.so", timeout)
-        
-        # 6. Link executable
-        cmd6 = f"""/usr/bin/c++ -O3 -DNDEBUG -fPIC -shared \
-        {OUTPUT_PATH}/kernel_cpp.o \
-        {OUTPUT_PATH}/main_cpp.o \
-        -o {OUTPUT_PATH}/main.so \
-        -L{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib \
-        -L{PPL_TOP}/runtime/{CHIP}/lib \
-        -Wl,--disable-new-dtags,-rpath,{PPL_TOP}/runtime/{CHIP}/tpuv7-runtime-emulator/lib:{PPL_TOP}/runtime/{CHIP}/lib \
-        -ltpuv7_rt -lcdm_daemon_emulator -lpthread"""
-                
-        execute_command(cmd6, "Link main.so lib", timeout)
+    def tpu_compile_cmodel(self, timeout, layout: PPLLayout):
+        src_dir = get_tpu_template_dir()
+        definitions, includes = self._ppl_compile_flags(layout, src_dir)
+        definitions.append("-DUSING_CMODEL")
+        common = definitions + includes + ["-O3", "-DNDEBUG", "-fPIC"]
+
+        kernel_c = os.path.join(src_dir, "kernel.c")
+        kernel_cpp_o = os.path.join(src_dir, "kernel_cpp.o")
+        main_cpp_o = os.path.join(src_dir, "main_cpp.o")
+        kernel_c_o = os.path.join(src_dir, "kernel_c.o")
+        helper_o = os.path.join(src_dir, "ppl_helper_c.o")
+        libkernel = os.path.join(src_dir, "libkernel.so")
+        main_so = os.path.join(src_dir, "main.so")
+        rpath = f"{layout.runtime_lib}:{layout.backend_lib}"
+
+        # TPUv7 defaults to eight emulator cores. SG2260E exposes four, and
+        # launching the extra scalar-emulator workers makes them address
+        # non-existent cores before the first kernel can complete.
+        os.environ["TPU_RT_CORE_NUM"] = str(layout.max_core_num)
+
+        logger.info("Compiling TPU cmodel kernel for %s (%s layout)", layout.arch, layout.release)
+        self._prepare_cmodel_kernel_source(kernel_c)
+        self._run_tpu_command(
+            ["/usr/bin/c++", *common, "-std=c++17", "-c",
+             os.path.join(src_dir, "kernel.cpp"), "-o", kernel_cpp_o],
+            "Compile TPU host wrapper", timeout)
+        self._run_tpu_command(
+            ["/usr/bin/c++", *common, "-std=c++17", "-c",
+             os.path.join(src_dir, "main.cpp"), "-o", main_cpp_o],
+            "Compile TPU host entry", timeout)
+        self._run_tpu_command(
+            ["/usr/bin/cc", *common, "-Dkernel_EXPORTS", "-c", kernel_c, "-o", kernel_c_o],
+            "Compile TPU cmodel kernel", timeout)
+        self._run_tpu_command(
+            ["/usr/bin/cc", *common, "-Dkernel_EXPORTS", "-c",
+             str(layout.ppl_helper_source), "-o", helper_o],
+            "Compile PPL helper", timeout)
+        self._run_tpu_command(
+            ["/usr/bin/cc", "-shared", "-fPIC", "-Wl,--no-undefined",
+             "-Wl,-soname,libkernel.so", "-o", libkernel, kernel_c_o, helper_o,
+             f"-Wl,-rpath,{rpath}", str(layout.emulator_library), "-lm"],
+            "Link cmodel libkernel.so", timeout)
+        self._run_tpu_command(
+            ["/usr/bin/c++", "-shared", "-fPIC", "-o", main_so,
+             kernel_cpp_o, main_cpp_o, f"-L{layout.runtime_lib}", f"-L{layout.backend_lib}",
+             f"-Wl,--disable-new-dtags,-rpath,{rpath}", "-ltpuv7_rt",
+             "-lcdm_daemon_emulator", "-lpthread"],
+            "Link cmodel main.so", timeout)
+        os.environ["PPL_KERNEL_PATH"] = libkernel

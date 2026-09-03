@@ -1,5 +1,4 @@
 #include <tpuv7_rt.h>
-#include "host_test_utils.h"
 #include "kernel.h"
 #include <cstdlib>
 #include <cstring>
@@ -17,7 +16,11 @@ int init(){{
   if (ret != tpuRtSuccess) {{
     return -1;
   }}
+#ifdef USING_CMODEL
+  tpuRtSetDevice(0);
+#else
   tpuRtSetDevice(14); // Set TPU ID
+#endif
   tpuRtStreamCreate(&stream);
   auto kernel_dir = getenv("PPL_KERNEL_PATH");
   if (!kernel_dir) {{

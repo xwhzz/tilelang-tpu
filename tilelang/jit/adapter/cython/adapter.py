@@ -17,6 +17,7 @@ from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
 from tilelang.contrib.cc import get_cplus_compiler
+from tilelang.engine.tpu_config import TPUCompileConfig, resolve_tpu_compile_config
 import torch
 import sys
 import sysconfig
@@ -169,7 +170,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 mode: Literal["pcie", "cmodel"] = "pcie"):
+                 mode: Optional[Literal["pcie", "cmodel"]] = None,
+                 tpu_config: Optional[TPUCompileConfig] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -197,9 +199,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.buffer_device_map = self._process_buffer_device()
 
         self.verbose = verbose
-        self.mode = mode
+        self.tpu_config = tpu_config or resolve_tpu_compile_config(mode=mode)
+        self.mode = self.tpu_config.runtime_mode
         self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target, self.mode)
+        self.lib_generator = LibraryGenerator(self.target, tpu_config=self.tpu_config)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
